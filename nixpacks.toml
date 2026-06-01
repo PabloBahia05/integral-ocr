@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["tesseract", "tesseract-data-spa", "tesseract-data-eng"]
+nixPkgs = ["tesseract", "tesseract-data.eng", "tesseract-data.spa"]
