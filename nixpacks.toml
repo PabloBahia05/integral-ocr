@@ -1,2 +1,8 @@
 [phases.setup]
-nixPkgs = ["tesseract"]
+nixPkgs = ["python3", "tesseract"]
+
+[phases.install]
+cmds = ["pip3 install -r requirements.txt"]
+
+[start]
+cmd = "python3 ocr_worker.py"
