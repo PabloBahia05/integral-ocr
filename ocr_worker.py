@@ -141,7 +141,32 @@ def parsear_linea_item(linea):
         "subtotalprod": limpiar_numero(subtotal_str),
     }
 
-def extraer_items(texto):
+def extraer_total_por_posicion(img):
+    """Busca el número más grande en la mitad inferior derecha de la imagen."""
+    data = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng', output_type=pytesseract.Output.DICT)
+    w, h = img.size
+    numeros = []
+    for i, text in enumerate(data['text']):
+        if not text.strip():
+            continue
+        x = data['left'][i]
+        y = data['top'][i]
+        # Solo mitad inferior y mitad derecha
+        if y < h * 0.6 or x < w * 0.5:
+            continue
+        # Intentar parsear como número argentino
+        clean = text.strip().replace('.', '').replace(',', '.')
+        try:
+            val = float(clean)
+            if val > 100:  # ignorar porcentajes y números pequeños
+                numeros.append((val, text))
+        except ValueError:
+            continue
+    if not numeros:
+        return None
+    # Devolver el mayor
+    numeros.sort(key=lambda x: x[0], reverse=True)
+    return limpiar_numero(numeros[0][1])
     items = []
     for linea_raw in texto.split('\n'):
         linea = limpiar_linea(linea_raw)
@@ -178,16 +203,11 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Para total tomamos el último valor encontrado (incluye IIBB)
-    totales = re.findall(PATRONES['total'], texto)
-    total = limpiar_numero(totales[-1]) if totales else None
-
-    # Si pers_IIBB tiene valor, recalcular total como subtotal + iva + pers_IIBB
-    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
-    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
-    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
-    if pers_val > 0:
-        total = round(subtotal_val + iva_val + pers_val, 2)
+    # Total: buscar el número más grande en la mitad inferior derecha
+    total = extraer_total_por_posicion(img)
+    if total is None:
+        totales = re.findall(PATRONES['total'], texto)
+        total = limpiar_numero(totales[-1]) if totales else None
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
