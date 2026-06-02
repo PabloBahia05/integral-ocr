@@ -217,7 +217,6 @@ def ocr():
     }
 
     items = extraer_items(texto)
-    # Agregar justo antes del return jsonify(...)
     print("[OCR] texto_raw:", texto)
     return jsonify({'factura': factura, 'items': items})
 
