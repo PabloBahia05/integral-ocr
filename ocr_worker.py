@@ -28,19 +28,16 @@ PATRONES = {
     "pers_IIBB":      r"(?i)perc[./]?\s*i{1,2}b{1,2}\s*:?\s*(?:[A-Za-z 0-9]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
 
-# Monto en formato argentino: 1.234,56
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
-# Cantidad: 4,00 o 4,5
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
-# Palabras que indican fin de la tabla de ítems
 STOP_RE = re.compile(
     r'(?i)^(subtotal|total|gravado|descuento|flete|perc|exento|'
     r'c\.a\.e|entrega|transporte|atendido|nota|original|n\.p\.|'
     r'dto\.|vto\.|iva\s+insc)'
 )
 
-# ── Helpers numéricos ─────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def limpiar_numero(s):
     if not s:
         return None
@@ -74,7 +71,6 @@ def extraer_campo(texto, patron):
         return None
     return m.group(m.lastindex).strip() if m.lastindex else m.group(0).strip()
 
-# ── Limpieza de líneas ────────────────────────────────────────────────────────
 def es_espurio(c):
     if unicodedata.category(c) in ('Pd', 'Ps', 'Pe'):
         return True
@@ -93,54 +89,6 @@ def corregir_codigo(codigo):
         return codigo
     return re.sub(r'^\$(?=[A-Za-z0-9])', 'S', codigo)
 
-# ── Parser de ítem línea por línea ───────────────────────────────────────────
-def parsear_linea_item(linea):
-    linea = linea.strip()
-    if not linea:
-        return None
-
-    m_fin = re.search(
-        r'(' + NUM_ARG + r')\s+(?:[(]\d+[,.]\d+%[)]\s+)?(' + NUM_ARG + r')\s*$',
-        linea
-    )
-    if not m_fin:
-        return None
-
-    precio_str   = m_fin.group(1)
-    subtotal_str = m_fin.group(2)
-    resto        = linea[:m_fin.start()].strip()
-
-    m_cant = re.search(r'(?<!\d)(' + CANT_PAT + r')(?!\d)\s+', resto)
-    if not m_cant:
-        return None
-
-    cant_str   = m_cant.group(1)
-    antes_cant = resto[:m_cant.start()].strip()
-    desc       = resto[m_cant.end():].strip()
-
-    desc = re.sub(r'\s*[(]\d+[,.]\d+%[)]\s*$', '', desc).strip()
-
-    codigo = antes_cant if re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', antes_cant) else None
-    if codigo:
-        codigo = corregir_codigo(codigo)
-
-    if not codigo and desc:
-        tokens = desc.split()
-        if tokens and re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', tokens[0]) and len(tokens[0]) <= 12:
-            codigo = corregir_codigo(tokens[0])
-            desc = ' '.join(tokens[1:]).strip()
-
-    if not desc and not codigo:
-        return None
-
-    return {
-        "codigo":       codigo,
-        "descripcion":  desc or None,
-        "cantidad":     limpiar_numero(cant_str),
-        "precio_unit":  limpiar_numero(precio_str),
-        "subtotalprod": limpiar_numero(subtotal_str),
-    }
-
 def extraer_total_por_posicion(img):
     """Busca el número más grande en la mitad inferior derecha de la imagen."""
     data = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng', output_type=pytesseract.Output.DICT)
@@ -151,22 +99,59 @@ def extraer_total_por_posicion(img):
             continue
         x = data['left'][i]
         y = data['top'][i]
-        # Solo mitad inferior y mitad derecha
         if y < h * 0.6 or x < w * 0.5:
             continue
-        # Intentar parsear como número argentino
         clean = text.strip().replace('.', '').replace(',', '.')
         try:
             val = float(clean)
-            if val > 100:  # ignorar porcentajes y números pequeños
+            if val > 100:
                 numeros.append((val, text))
         except ValueError:
             continue
     if not numeros:
         return None
-    # Devolver el mayor
     numeros.sort(key=lambda x: x[0], reverse=True)
     return limpiar_numero(numeros[0][1])
+
+def parsear_linea_item(linea):
+    linea = linea.strip()
+    if not linea:
+        return None
+    m_fin = re.search(
+        r'(' + NUM_ARG + r')\s+(?:[(]\d+[,.]\d+%[)]\s+)?(' + NUM_ARG + r')\s*$',
+        linea
+    )
+    if not m_fin:
+        return None
+    precio_str   = m_fin.group(1)
+    subtotal_str = m_fin.group(2)
+    resto        = linea[:m_fin.start()].strip()
+    m_cant = re.search(r'(?<!\d)(' + CANT_PAT + r')(?!\d)\s+', resto)
+    if not m_cant:
+        return None
+    cant_str   = m_cant.group(1)
+    antes_cant = resto[:m_cant.start()].strip()
+    desc       = resto[m_cant.end():].strip()
+    desc = re.sub(r'\s*[(]\d+[,.]\d+%[)]\s*$', '', desc).strip()
+    codigo = antes_cant if re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', antes_cant) else None
+    if codigo:
+        codigo = corregir_codigo(codigo)
+    if not codigo and desc:
+        tokens = desc.split()
+        if tokens and re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', tokens[0]) and len(tokens[0]) <= 12:
+            codigo = corregir_codigo(tokens[0])
+            desc = ' '.join(tokens[1:]).strip()
+    if not desc and not codigo:
+        return None
+    return {
+        "codigo":       codigo,
+        "descripcion":  desc or None,
+        "cantidad":     limpiar_numero(cant_str),
+        "precio_unit":  limpiar_numero(precio_str),
+        "subtotalprod": limpiar_numero(subtotal_str),
+    }
+
+def extraer_items(texto):
     items = []
     for linea_raw in texto.split('\n'):
         linea = limpiar_linea(linea_raw)
@@ -177,7 +162,6 @@ def extraer_total_por_posicion(img):
             items.append(item)
     return items
 
-# ── Preprocesamiento imagen ───────────────────────────────────────────────────
 def preparar_imagen(file_obj):
     img = Image.open(file_obj).convert('RGB')
     w, h = img.size
@@ -203,7 +187,7 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Total: buscar el número más grande en la mitad inferior derecha
+    # Total: número más grande en mitad inferior derecha
     total = extraer_total_por_posicion(img)
     if total is None:
         totales = re.findall(PATRONES['total'], texto)
