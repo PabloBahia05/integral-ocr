@@ -26,6 +26,7 @@ PATRONES = {
     "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
     "total":          r"(?i)total\s*:?\s*\$?\s*([\d\.,]+)",
     "moneda":         r"(?i)\b(USD|ARS|EUR)\b",
+    "pers_IIBB":      r"(?i)(?:perc(?:epci[oó]n)?\.?\s*(?:ing\.?\s*brutos?|iibb|i\.b\.|ingresos\s+brutos?))\s*:?\s*\$?\s*([\d\.,]+)",
 }
 
 # Monto en formato argentino: 1.234,56
@@ -211,6 +212,7 @@ def ocr():
         'iva':            limpiar_numero(extraer_campo(texto, PATRONES['iva'])),
         'total':          limpiar_numero(extraer_campo(texto, PATRONES['total'])),
         'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
+        'pers_IIBB':      limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])),
         'texto_raw':      texto,
     }
 
