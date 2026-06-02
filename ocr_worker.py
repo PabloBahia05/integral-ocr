@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 ocr_worker.py  —  Flask OCR worker para facturas argentinas
-Corre en localhost:5001
 """
 
 import re
@@ -77,10 +76,8 @@ def extraer_campo(texto, patron):
 
 # ── Limpieza de líneas ────────────────────────────────────────────────────────
 def es_espurio(c):
-    """Caracteres que Tesseract genera al leer bordes de celdas."""
     if unicodedata.category(c) in ('Pd', 'Ps', 'Pe'):
         return True
-    # Solo símbolos claramente no alfanuméricos
     if c in (chr(92), chr(39), chr(96), chr(34), '~'):
         return True
     return False
@@ -92,27 +89,16 @@ def limpiar_linea(linea):
     return linea[i:]
 
 def corregir_codigo(codigo):
-    """
-    Tesseract confunde S con $ al inicio de códigos de AGLOLAM.
-    Ej: $14018F → S14018F, $11118S → S11118S
-    """
     if not codigo:
         return codigo
-    # $ al inicio seguido de dígito o letra → era una S
     return re.sub(r'^\$(?=[A-Za-z0-9])', 'S', codigo)
 
 # ── Parser de ítem línea por línea ───────────────────────────────────────────
 def parsear_linea_item(linea):
-    """
-    Parsea una línea como ítem de factura buscando desde el final:
-      [CODIGO] CANTIDAD DESCRIPCION PRECIO_UNIT [(DESC%)] SUBTOTAL
-    Devuelve dict o None si la línea no es un ítem válido.
-    """
     linea = linea.strip()
     if not linea:
         return None
 
-    # Buscar PRECIO y SUBTOTAL al final de la línea
     m_fin = re.search(
         r'(' + NUM_ARG + r')\s+(?:[(]\d+[,.]\d+%[)]\s+)?(' + NUM_ARG + r')\s*$',
         linea
@@ -124,32 +110,26 @@ def parsear_linea_item(linea):
     subtotal_str = m_fin.group(2)
     resto        = linea[:m_fin.start()].strip()
 
-    # Buscar CANTIDAD en el resto (primera ocurrencia de patrón cantidad)
     m_cant = re.search(r'(?<!\d)(' + CANT_PAT + r')(?!\d)\s+', resto)
     if not m_cant:
         return None
 
     cant_str   = m_cant.group(1)
-    antes_cant = resto[:m_cant.start()].strip()   # posible código
-    desc       = resto[m_cant.end():].strip()      # descripción
+    antes_cant = resto[:m_cant.start()].strip()
+    desc       = resto[m_cant.end():].strip()
 
-    # Limpiar porcentajes residuales de la descripción
     desc = re.sub(r'\s*[(]\d+[,.]\d+%[)]\s*$', '', desc).strip()
 
-    # Código: alfanumérico, permitir $ al inicio (Tesseract confunde S con $)
     codigo = antes_cant if re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', antes_cant) else None
     if codigo:
         codigo = corregir_codigo(codigo)
 
-    # Si no hay código antes de la cantidad, buscar si la descripción empieza
-    # con un token que Tesseract pegó a ella
     if not codigo and desc:
         tokens = desc.split()
         if tokens and re.match(r'^[\$A-Za-z0-9][A-Za-z0-9]{1,19}$', tokens[0]) and len(tokens[0]) <= 12:
             codigo = corregir_codigo(tokens[0])
             desc = ' '.join(tokens[1:]).strip()
 
-    # Descartar si no hay descripción ni código
     if not desc and not codigo:
         return None
 
@@ -163,17 +143,13 @@ def parsear_linea_item(linea):
 
 def extraer_items(texto):
     items = []
-    print("[OCR] === LÍNEAS ANALIZADAS COMO ÍTEMS ===")
     for linea_raw in texto.split('\n'):
         linea = limpiar_linea(linea_raw)
         if STOP_RE.search(linea):
             continue
         item = parsear_linea_item(linea)
         if item:
-            print(f"[OCR]  raw: {repr(linea_raw)}")
-            print(f"[OCR]  → codigo={item['codigo']} desc={item['descripcion']}")
             items.append(item)
-    print("[OCR] === FIN ÍTEMS ===")
     return items
 
 # ── Preprocesamiento imagen ───────────────────────────────────────────────────
@@ -202,7 +178,7 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Para total tomamos el último valor encontrado (el total real incluye IIBB)
+    # Para total tomamos el último valor encontrado (incluye IIBB)
     totales = re.findall(PATRONES['total'], texto)
     total = limpiar_numero(totales[-1]) if totales else None
 
@@ -227,8 +203,7 @@ def ocr():
 @app.get('/ping')
 def ping():
     return jsonify({'ok': True})
-app.logger.warning("[OCR] totales: %s", re.findall(PATRONES['total'], texto))
-app.logger.warning("[OCR] lineas_total: %s", [l for l in texto.split('\n') if 'total' in l.lower()])
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
