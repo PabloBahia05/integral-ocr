@@ -24,7 +24,7 @@ PATRONES = {
     "subtotal":       r"(?i)subtotal\s*:?\s*\$?\s*([\d\.,]+)",
     "iva_pct":        r"(?i)iva\s+(?:insc\.?\s+)?(10[,\.]?5|21|27)\s*%",
     "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
-    "total":          r"(?i)total\s*:?\s*\$?\s*([\d\.,]+)",
+    "total":          r"(?i)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)",
     "moneda":         r"(?i)\b(USD|ARS|EUR)\b",
     "pers_IIBB":      r"(?i)perc[./]?\s*i{1,2}b{1,2}\s*:?\s*(?:[A-Za-z 0-9]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
@@ -221,9 +221,6 @@ def ocr():
     }
 
     items = extraer_items(texto)
-    app.logger.warning("[OCR] pers_IIBB raw: %s", extraer_campo(texto, PATRONES['pers_IIBB']))
-    app.logger.warning("[OCR] texto_iibb: %s", [l for l in texto.split('\n') if 'iibb' in l.lower() or 'perc' in l.lower()])
-    app.logger.warning("[OCR] totales: %s", re.findall(PATRONES['total'], texto))
     return jsonify({'factura': factura, 'items': items})
 
 
