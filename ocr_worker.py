@@ -202,6 +202,10 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
+    # Para total tomamos el último valor encontrado (el total real incluye IIBB)
+    totales = re.findall(PATRONES['total'], texto)
+    total = limpiar_numero(totales[-1]) if totales else None
+
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
@@ -210,7 +214,7 @@ def ocr():
         'subtotal':       limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])),
         'iva_pct':        iva_pct,
         'iva':            limpiar_numero(extraer_campo(texto, PATRONES['iva'])),
-        'total':          limpiar_numero(extraer_campo(texto, PATRONES['total'])),
+        'total':          total,
         'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
         'pers_IIBB':      limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])),
         'texto_raw':      texto,
