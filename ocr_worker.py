@@ -182,6 +182,13 @@ def ocr():
     totales = re.findall(PATRONES['total'], texto)
     total = limpiar_numero(totales[-1]) if totales else None
 
+    # Si pers_IIBB tiene valor, recalcular total como subtotal + iva + pers_IIBB
+    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
+    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
+    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+    if pers_val > 0:
+        total = round(subtotal_val + iva_val + pers_val, 2)
+
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
