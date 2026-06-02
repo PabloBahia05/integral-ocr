@@ -227,7 +227,8 @@ def ocr():
 @app.get('/ping')
 def ping():
     return jsonify({'ok': True})
-
+app.logger.warning("[OCR] totales: %s", re.findall(PATRONES['total'], texto))
+app.logger.warning("[OCR] lineas_total: %s", [l for l in texto.split('\n') if 'total' in l.lower()])
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
