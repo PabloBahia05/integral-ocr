@@ -217,7 +217,8 @@ def ocr():
     }
 
     items = extraer_items(texto)
-    print("[OCR] texto_raw:", texto)
+    app.logger.warning("[OCR] pers_IIBB raw: %s", extraer_campo(texto, PATRONES['pers_IIBB']))
+    app.logger.warning("[OCR] texto_iibb: %s", [l for l in texto.split('\n') if 'iibb' in l.lower() or 'perc' in l.lower()])
     return jsonify({'factura': factura, 'items': items})
 
 
