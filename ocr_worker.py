@@ -26,7 +26,7 @@ PATRONES = {
     "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
     "total":          r"(?i)total\s*:?\s*\$?\s*([\d\.,]+)",
     "moneda":         r"(?i)\b(USD|ARS|EUR)\b",
-    "pers_IIBB":      r"(?i)(?:perc(?:epci[oó]n)?\.?\s*(?:ing\.?\s*brutos?|iibb|i\.b\.|ingresos\s+brutos?))\s*:?\s*\$?\s*([\d\.,]+)",
+    "pers_IIBB":      r"(?i)perc\.?\s*iibb\s*:?\s*(?:[A-Za-z ]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
 
 # Monto en formato argentino: 1.234,56
