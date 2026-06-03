@@ -5,10 +5,12 @@ ocr_worker.py  —  Flask OCR worker para facturas argentinas
 
 import re
 import unicodedata
+import tempfile
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image, ImageOps
 import pytesseract
+import pdfplumber
 import os
 
 app = Flask(__name__)
@@ -182,6 +184,79 @@ def ocr():
     iva_val,
     pers_val,
     total)
+
+    factura = {
+        'numero':         extraer_campo(texto, PATRONES['numero']),
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
+        'tipo_factura':   tipo_factura,
+        'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
+        'subtotal':       limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])),
+        'iva_pct':        iva_pct,
+        'iva':            limpiar_numero(extraer_campo(texto, PATRONES['iva'])),
+        'total':          total,
+        'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
+        'pers_IIBB':      limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])),
+        'texto_raw':      texto,
+    }
+
+    items = extraer_items(texto)
+    return jsonify({'factura': factura, 'items': items})
+
+
+@app.post('/ocr-pdf')
+def ocr_pdf():
+    if 'pdf' not in request.files:
+        return jsonify({'error': 'No se recibió archivo PDF'}), 400
+
+    archivo = request.files['pdf']
+    if not archivo.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'El archivo no es un PDF'}), 400
+
+    # Guardar temporalmente y extraer texto con pdfplumber
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+        archivo.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        texto = ''
+        with pdfplumber.open(tmp_path) as pdf:
+            for pagina in pdf.pages:
+                t = pagina.extract_text()
+                if t:
+                    texto += t + '\n'
+
+        # Si pdfplumber no extrajo nada (PDF escaneado), hacer OCR página por página
+        if not texto.strip():
+            import fitz  # PyMuPDF
+            doc = fitz.open(tmp_path)
+            for num_pag in range(len(doc)):
+                pix = doc[num_pag].get_pixmap(dpi=200)
+                img_data = pix.tobytes("png")
+                from io import BytesIO
+                img = Image.open(BytesIO(img_data)).convert('RGB')
+                img = ImageOps.grayscale(img)
+                img = ImageOps.autocontrast(img, cutoff=2)
+                texto += pytesseract.image_to_string(img, config='--psm 6 -l spa+eng') + '\n'
+    finally:
+        os.unlink(tmp_path)
+
+    app.logger.warning("OCR-PDF TEXTO:\n%s", texto)
+
+    m_tipo   = re.search(PATRONES['tipo_factura'], texto)
+    tipo_factura = m_tipo.group(1).upper() if m_tipo else None
+
+    m_iva_pct = re.search(PATRONES['iva_pct'], texto)
+    iva_pct   = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
+
+    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
+    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
+    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+    total_leido  = limpiar_numero(extraer_campo(texto, PATRONES['total']))
+
+    if total_leido:
+        total = total_leido
+    else:
+        total = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
