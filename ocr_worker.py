@@ -163,24 +163,12 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Total: buscar línea que empiece con TOTAL (no subtotal) y tomar el número
-    total = None
-    lineas_total = [l for l in texto.split('\n') if 'total' in l.lower()]
-    app.logger.warning("[OCR] lineas_total: %s", lineas_total)
-    for linea in texto.split('\n'):
-        linea_strip = linea.strip()
-        if re.match(r'(?i)^total\s*:', linea_strip):
-            m = re.search(r'([\d]+(?:[.][\d]{3})*[,][\d]{2})', linea_strip)
-            if m:
-                total = limpiar_numero(m.group(1))
-                break
-    # Si no encontró total por línea, calcular subtotal + iva + pers_IIBB
-    if total is None:
-        subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
-        iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
-        pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
-        app.logger.warning("[OCR] fallback: sub=%s iva=%s pers=%s", subtotal_val, iva_val, pers_val)
-        total        = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+    # Total: siempre calcular subtotal + iva + pers_IIBB
+    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
+    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
+    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+    total        = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+    app.logger.warning("[OCR] total calculado: sub=%s iva=%s pers=%s total=%s", subtotal_val, iva_val, pers_val, total)
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
