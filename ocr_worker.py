@@ -165,6 +165,8 @@ def ocr():
 
     # Total: buscar línea que empiece con TOTAL (no subtotal) y tomar el número
     total = None
+    lineas_total = [l for l in texto.split('\n') if 'total' in l.lower()]
+    app.logger.warning("[OCR] lineas_total: %s", lineas_total)
     for linea in texto.split('\n'):
         linea_strip = linea.strip()
         if re.match(r'(?i)^total\s*:', linea_strip):
@@ -172,9 +174,12 @@ def ocr():
             if m:
                 total = limpiar_numero(m.group(1))
                 break
+    # Si no encontró total por línea, calcular subtotal + iva + pers_IIBB
     if total is None:
-        totales = re.findall(r'(?i)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)', texto)
-        total = limpiar_numero(totales[-1]) if totales else None
+        subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
+        iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
+        pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+        total        = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
