@@ -89,30 +89,6 @@ def corregir_codigo(codigo):
         return codigo
     return re.sub(r'^\$(?=[A-Za-z0-9])', 'S', codigo)
 
-def extraer_total_por_posicion(img):
-    """Busca el número más grande en la mitad inferior derecha de la imagen."""
-    data = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng', output_type=pytesseract.Output.DICT)
-    w, h = img.size
-    numeros = []
-    for i, text in enumerate(data['text']):
-        if not text.strip():
-            continue
-        x = data['left'][i]
-        y = data['top'][i]
-        if y < h * 0.6 or x < w * 0.5:
-            continue
-        clean = text.strip().replace('.', '').replace(',', '.')
-        try:
-            val = float(clean)
-            if val > 100:
-                numeros.append((val, text))
-        except ValueError:
-            continue
-    if not numeros:
-        return None
-    numeros.sort(key=lambda x: x[0], reverse=True)
-    return limpiar_numero(numeros[0][1])
-
 def parsear_linea_item(linea):
     linea = linea.strip()
     if not linea:
@@ -187,10 +163,17 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Total: número más grande en mitad inferior derecha
-    total = extraer_total_por_posicion(img)
+    # Total: buscar línea que empiece con TOTAL (no subtotal) y tomar el número
+    total = None
+    for linea in texto.split('\n'):
+        linea_strip = linea.strip()
+        if re.match(r'(?i)^total\s*:', linea_strip):
+            m = re.search(r'([\d]+(?:[.][\d]{3})*[,][\d]{2})', linea_strip)
+            if m:
+                total = limpiar_numero(m.group(1))
+                break
     if total is None:
-        totales = re.findall(PATRONES['total'], texto)
+        totales = re.findall(r'(?i)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)', texto)
         total = limpiar_numero(totales[-1]) if totales else None
 
     factura = {
