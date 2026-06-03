@@ -156,8 +156,10 @@ def ocr():
 
     img   = preparar_imagen(request.files['imagen'])
     texto = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
-
+    app.logger.warning("OCR TEXTO:\n%s", texto)
+    
     m_tipo = re.search(PATRONES['tipo_factura'], texto)
+    
     tipo_factura = m_tipo.group(1).upper() if m_tipo else None
 
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
