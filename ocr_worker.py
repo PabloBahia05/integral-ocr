@@ -204,6 +204,7 @@ def ocr():
 
 
 @app.post('/ocr-pdf')
+@app.post('/ocr-pdf-preview')
 def ocr_pdf():
     if 'pdf' not in request.files:
         return jsonify({'error': 'No se recibió archivo PDF'}), 400
