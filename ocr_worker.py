@@ -23,7 +23,7 @@ PATRONES = {
     "subtotal":       r"(?i)subtotal\s*:?\s*\$?\s*([\d\.,]+)",
     "iva_pct":        r"(?i)iva\s+(?:insc\.?\s+)?(10[,\.]?5|21|27)\s*%",
     "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
-    "total":          r"(?i)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)",
+    "total":          r"(?is)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)",
     "moneda":         r"(?i)\b(USD|ARS|EUR)\b",
     "pers_IIBB":      r"(?i)perc[./]?\s*i{1,2}b{1,2}\s*:?\s*(?:[A-Za-z 0-9]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
@@ -163,12 +163,23 @@ def ocr():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    # Total: siempre calcular subtotal + iva + pers_IIBB
     subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
     iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
     pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
-    total        = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
-    app.logger.warning("[OCR] total calculado: sub=%s iva=%s pers=%s total=%s", subtotal_val, iva_val, pers_val, total)
+    total_leido = limpiar_numero(extraer_campo(texto, PATRONES['total']))
+
+    if total_leido:
+        total = total_leido
+    else:
+        total = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+
+    app.logger.warning(
+    "[OCR] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
+    total_leido,
+    subtotal_val,
+    iva_val,
+    pers_val,
+    total)
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
