@@ -179,6 +179,7 @@ def ocr():
         subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
         iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
         pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+        app.logger.warning("[OCR] fallback: sub=%s iva=%s pers=%s", subtotal_val, iva_val, pers_val)
         total        = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
 
     factura = {
