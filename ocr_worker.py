@@ -33,6 +33,115 @@ PATRONES = {
     "pers_IIBB":      r"(?i)perc[./]?\s*i{1,2}b{1,2}\s*:?\s*(?:[A-Za-z 0-9]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
 
+# ── Detección de proveedor ────────────────────────────────────────────────────
+PROVEEDORES = {
+    "placasur":  re.compile(r'(?i)placasur|DISTRIBUIDORA PLACASUR'),
+    "cantochap": re.compile(r'(?i)cantochap'),
+    "aglolam":   re.compile(r'(?i)aglolam'),
+}
+
+def detectar_proveedor(texto):
+    for nombre, patron in PROVEEDORES.items():
+        if patron.search(texto):
+            return nombre
+    return "generico"
+
+# ── Patrones específicos PlacaSur ─────────────────────────────────────────────
+PATRONES_PLACASUR = {
+    # N°: 00018-00018355
+    "numero":         r"N[°º]:\s*([\d]{5}-[\d]{8})",
+    "fecha":          r"Fecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "vencimiento":    r"Vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r"Factura\s+([A-Z])\b",
+    "cae":            r"CAE:\s*(\d+)",
+    "cae_vto":        r"VTO:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"Condicion de Venta:\s*(.+?)(?:\n|Cnel|$)",
+    "cliente_nombre": r"Señor\(es\):\s*(.+?)(?:\n|$)",
+    "cliente_cuit":   r"CUIT:\s*([\d-]+)",
+    # Totales: "Gravado ARS 1.561.659,29"
+    "gravado":        r"(?i)Gravado\s+ARS\s+([\d.]+,\d{2})",
+    "subtotal":       r"(?i)Subtotal\s+ARS\s+([\d.]+,\d{2})",
+    "iva":            r"(?i)IVA:\s+ARS\s+([\d.]+,\d{2})",
+    "iva_pct":        r"(?i)IVA\s+(21|10[,.]?5|27)\s*%",
+    "pers_IIBB":      r"(?i)Total Percep\.\s*:\s*ARS\s+([\d.]+,\d{2})",
+    "total":          r"(?i)Total:\s*ARS\s+([\d.]+,\d{2})",
+}
+
+# Items PlacaSur: CODIGO  DESCRIPCION  CANTIDAD  UN  (UNxART)  PRECIO_ARS  PRECIO_DESC_ARS  DESC%  TOTAL_ARS
+# Ej: "EHB35C9 BISAGRAS EUROHARD 35 C 9 250,00 UN (1) 607,09 394,76 34,98% 98.690,82"
+_NUM_ARG_PS = r'[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}'
+_CANT_PS    = r'[\d]+[,][\d]{2}'
+_DESC_PS    = r'[\d]+[,][\d]{2}%'
+
+ITEM_RE_PLACASUR = re.compile(
+    r'^(\S+)\s+'           # codigo
+    r'(.+?)\s+'            # descripcion
+    r'(' + _CANT_PS + r')\s+'   # cantidad
+    r'UN\s+\(\d+\)\s+'    # unidad
+    r'(' + _NUM_ARG_PS + r')\s+'  # precio ARS
+    r'(' + _NUM_ARG_PS + r')\s+'  # precio desc ARS
+    r'' + _DESC_PS + r'\s+'       # descuento %
+    r'(' + _NUM_ARG_PS + r')'     # total ARS
+    r'\s*$',
+    re.IGNORECASE
+)
+
+LOTE_RE_PLACASUR = re.compile(r'(?i)^Lote\s+Nro\s+Lote:', re.MULTILINE)
+
+def extraer_items_placasur(texto):
+    items = []
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea:
+            continue
+        if LOTE_RE_PLACASUR.match(linea):
+            continue
+        m = ITEM_RE_PLACASUR.match(linea)
+        if m:
+            items.append({
+                "codigo":       m.group(1),
+                "descripcion":  m.group(2).strip(),
+                "cantidad":     limpiar_numero(m.group(3)),
+                "precio_unit":  limpiar_numero(m.group(5)),  # precio con descuento aplicado
+                "subtotalprod": limpiar_numero(m.group(6)),
+            })
+    return items
+
+def extraer_totales_placasur(texto):
+    subtotal = limpiar_numero(extraer_campo(texto, PATRONES_PLACASUR['subtotal']))
+    iva      = limpiar_numero(extraer_campo(texto, PATRONES_PLACASUR['iva']))
+    pers     = limpiar_numero(extraer_campo(texto, PATRONES_PLACASUR['pers_IIBB']))
+    total    = limpiar_numero(extraer_campo(texto, PATRONES_PLACASUR['total']))
+    if not total and subtotal:
+        total = round((subtotal or 0) + (iva or 0) + (pers or 0), 2)
+    return subtotal or 0, iva or 0, pers or 0, total, total
+
+def parsear_placasur(texto):
+    subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales_placasur(texto)
+    m_iva_pct = re.search(PATRONES_PLACASUR['iva_pct'], texto)
+    iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
+    factura = {
+        'proveedor':      'placasur',
+        'numero':         extraer_campo(texto, PATRONES_PLACASUR['numero']),
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['fecha'])),
+        'vencimiento':    normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['vencimiento'])),
+        'tipo_factura':   extraer_campo(texto, PATRONES_PLACASUR['tipo_factura']),
+        'cae':            extraer_campo(texto, PATRONES_PLACASUR['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_PLACASUR['condicion_pago']) or '').strip(),
+        'cliente_nombre': extraer_campo(texto, PATRONES_PLACASUR['cliente_nombre']),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_PLACASUR['cliente_cuit']),
+        'subtotal':       subtotal_val or None,
+        'iva_pct':        iva_pct,
+        'iva':            iva_val or None,
+        'pers_IIBB':      pers_val or None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_placasur(texto)
+    return factura, items
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -229,34 +338,37 @@ def ocr():
     img   = preparar_imagen(request.files['imagen'])
     texto = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
     app.logger.warning("OCR TEXTO:\n%s", texto)
-    
-    m_tipo = re.search(PATRONES['tipo_factura'], texto)
-    tipo_factura = m_tipo.group(1).upper() if m_tipo else None
 
-    m_iva_pct = re.search(PATRONES['iva_pct'], texto)
-    iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
+    proveedor = detectar_proveedor(texto)
+    app.logger.warning("[OCR] proveedor detectado: %s", proveedor)
 
-    subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
+    if proveedor == 'placasur':
+        factura, items = parsear_placasur(texto)
+    else:
+        m_tipo = re.search(PATRONES['tipo_factura'], texto)
+        tipo_factura = m_tipo.group(1).upper() if m_tipo else None
+        m_iva_pct = re.search(PATRONES['iva_pct'], texto)
+        iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
+        subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
+        app.logger.warning(
+            "[OCR] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
+            total_leido, subtotal_val, iva_val, pers_val, total)
+        factura = {
+            'proveedor':      proveedor,
+            'numero':         extraer_campo(texto, PATRONES['numero']),
+            'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
+            'tipo_factura':   tipo_factura,
+            'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
+            'subtotal':       subtotal_val or None,
+            'iva_pct':        iva_pct,
+            'iva':            iva_val or None,
+            'total':          total,
+            'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
+            'pers_IIBB':      pers_val or None,
+            'texto_raw':      texto,
+        }
+        items = extraer_items(texto)
 
-    app.logger.warning(
-        "[OCR] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
-        total_leido, subtotal_val, iva_val, pers_val, total)
-
-    factura = {
-        'numero':         extraer_campo(texto, PATRONES['numero']),
-        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
-        'tipo_factura':   tipo_factura,
-        'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
-        'subtotal':       subtotal_val or None,
-        'iva_pct':        iva_pct,
-        'iva':            iva_val or None,
-        'total':          total,
-        'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
-        'pers_IIBB':      pers_val or None,
-        'texto_raw':      texto,
-    }
-
-    items = extraer_items(texto)
     return jsonify({'factura': factura, 'items': items})
 
 
@@ -300,33 +412,36 @@ def ocr_pdf():
 
     app.logger.warning("OCR-PDF TEXTO:\n%s", texto)
 
-    m_tipo   = re.search(PATRONES['tipo_factura'], texto)
-    tipo_factura = m_tipo.group(1).upper() if m_tipo else None
+    proveedor = detectar_proveedor(texto)
+    app.logger.warning("[OCR-PDF] proveedor detectado: %s", proveedor)
 
-    m_iva_pct = re.search(PATRONES['iva_pct'], texto)
-    iva_pct   = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
+    if proveedor == 'placasur':
+        factura, items = parsear_placasur(texto)
+    else:
+        m_tipo   = re.search(PATRONES['tipo_factura'], texto)
+        tipo_factura = m_tipo.group(1).upper() if m_tipo else None
+        m_iva_pct = re.search(PATRONES['iva_pct'], texto)
+        iva_pct   = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
+        subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
+        app.logger.warning(
+            "[OCR-PDF] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
+            total_leido, subtotal_val, iva_val, pers_val, total)
+        factura = {
+            'proveedor':      proveedor,
+            'numero':         extraer_campo(texto, PATRONES['numero']),
+            'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
+            'tipo_factura':   tipo_factura,
+            'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
+            'subtotal':       subtotal_val or None,
+            'iva_pct':        iva_pct,
+            'iva':            iva_val or None,
+            'total':          total,
+            'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
+            'pers_IIBB':      pers_val or None,
+            'texto_raw':      texto,
+        }
+        items = extraer_items(texto)
 
-    subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
-
-    app.logger.warning(
-        "[OCR-PDF] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
-        total_leido, subtotal_val, iva_val, pers_val, total)
-
-    factura = {
-        'numero':         extraer_campo(texto, PATRONES['numero']),
-        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
-        'tipo_factura':   tipo_factura,
-        'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
-        'subtotal':       subtotal_val or None,
-        'iva_pct':        iva_pct,
-        'iva':            iva_val or None,
-        'total':          total,
-        'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
-        'pers_IIBB':      pers_val or None,
-        'texto_raw':      texto,
-    }
-
-    items = extraer_items(texto)
     return jsonify({'factura': factura, 'items': items})
 
 
