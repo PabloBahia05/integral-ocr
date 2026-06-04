@@ -39,8 +39,11 @@ CANT_PAT = r'\d+[,.]\d{1,3}'
 STOP_RE = re.compile(
     r'(?i)^(subtotal|total|gravado|descuento|flete|perc|exento|'
     r'c\.a\.e|entrega|transporte|atendido|nota|original|n\.p\.|'
-    r'dto\.|vto\.|iva\s+insc)'
+    r'dto\.|vto\.|iva\s+insc|bultos|son\s+pesos|pagos|cta\.|fecha\s+vto|'
+    r'[\d.,]+\s+[\d.,]+\s+\d+[,.]\d+%)'  # fila de totales formato Cantochap
 )
+
+UMED_RE = r'(?:UN|M2|KG|MT|ML|JGO|SET|PAR|LT|CM|MM|GL|U)'
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def limpiar_numero(s):
@@ -98,6 +101,23 @@ def parsear_linea_item(linea):
     linea = linea.strip()
     if not linea:
         return None
+
+    # Formato Cantochap: CODIGO  CANTIDAD(NUM_ARG)  UMED  DESCRIPCION  PRECIO  IMPORTE
+    # Ej: "400122 2.400,00 UN PVC BLANCO TX 22MM - 040MM SIN COLA 101,95 244.677,60"
+    m_cant = re.match(
+        r'^(\S+)\s+(' + NUM_ARG + r')\s+' + UMED_RE + r'\s+(.+?)\s+(' + NUM_ARG + r')\s+(' + NUM_ARG + r')\s*$',
+        linea, re.IGNORECASE
+    )
+    if m_cant:
+        return {
+            "codigo":       corregir_codigo(m_cant.group(1)),
+            "descripcion":  m_cant.group(3).strip(),
+            "cantidad":     limpiar_numero(m_cant.group(2)),
+            "precio_unit":  limpiar_numero(m_cant.group(4)),
+            "subtotalprod": limpiar_numero(m_cant.group(5)),
+        }
+
+    # Formato Aglolam: CODIGO  CANTIDAD  DESCRIPCION  (DESC%)  PRECIO  IMPORTE
     m_fin = re.search(
         r'(' + NUM_ARG + r')\s+(?:[(]\d+[,.]\d+%[)]\s+)?(' + NUM_ARG + r')\s*$',
         linea
