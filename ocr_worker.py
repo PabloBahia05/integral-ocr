@@ -18,14 +18,17 @@ CORS(app)
 
 # ── Patrones cabecera ─────────────────────────────────────────────────────────
 PATRONES = {
-    "numero":         r"(?i)nro\.?\s*:?\s*(\d{4}-\d{5,8})",
-    "fecha":          r"\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})\b",
+    "numero":         r"(?i)nro\.?\s*:?\s*(\d{4,5}\s*[-–]\s*\d{5,8})",
+    "fecha":          r"(?i)(?:fecha[^:]*?:?\s*)?(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
     "tipo_factura":   r"(?i)factura\s+([ABCME])\b",
     "condicion_pago": r"(?i)(contado|30\s*d[ií]as?|60\s*d[ií]as?|90\s*d[ií]as?|cuenta\s+corriente|1\s*d[ií]a\s*ff)",
-    "subtotal":       r"(?i)subtotal\s*:?\s*\$?\s*([\d\.,]+)",
+    # subtotal: formato Aglolam "Subtotal: 613.226,88" y Cantochap tabla "561.376,08"
+    "subtotal":       r"(?i)subtotal\s*[:\|]?\s*\$?\s*([\d\.,]+)",
     "iva_pct":        r"(?i)iva\s+(?:insc\.?\s+)?(10[,\.]?5|21|27)\s*%",
-    "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
-    "total":          r"(?is)(?<!sub)total\s*:?\s*\$?\s*([\d\.,]+)",
+    # iva: formato Aglolam "Iva Insc. 21,00 %: 128.777,64" y Cantochap "21,00% 117.888,98"
+    "iva":            r"(?i)iva\s+(?:insc\.?\s+)?(?:total\s*)?(?:10[,\.]?5|21|27)[,\.]?0*\s*%\s*:?\s*([\d\.,]+)",
+    # total: formato Aglolam "TOTAL: 743.230,97" y Cantochap "$\s*679.265,06"
+    "total":          r"(?is)(?:^|\s)\$?\s*([\d]{1,3}(?:[.][\d]{3})+[,][\d]{2})\s*$",
     "moneda":         r"(?i)\b(USD|ARS|EUR)\b",
     "pers_IIBB":      r"(?i)perc[./]?\s*i{1,2}b{1,2}\s*:?\s*(?:[A-Za-z 0-9]+\s+)?([\d]+(?:[.][\d]{3})*[,][\d]{2})",
 }
@@ -140,6 +143,53 @@ def extraer_items(texto):
             items.append(item)
     return items
 
+def extraer_totales(texto):
+    """
+    Extrae subtotal, iva, pers_IIBB y total soportando múltiples formatos:
+    - Aglolam: "Subtotal: 613.226,88" / "Iva Insc. 21,00 %: 128.777,64" / "TOTAL: 743.230,97"
+    - Cantochap: tabla con headers "Subtotal ... TOTAL" y valores en línea siguiente + "$ 679.265,06"
+    """
+    # ── Formato Cantochap: tabla con headers ──────────────────────────────────
+    # Línea: "Subtotal Descuentos Neto IVA No Gravado Percepciones TOTAL"
+    # Siguiente: "561.376,08 561.376,08 21,00% 117.888,98 0,00 0,00"
+    # Línea total: "$ 679.265,06"
+    subtotal_val = 0
+    iva_val      = 0
+    pers_val     = 0
+    total_leido  = None
+
+    m_tabla = re.search(
+        r'(?i)subtotal[^\n]*total\s*\n'
+        r'\s*([\d.]+,\d{2})'
+        r'[^\n]*?([\d.,]+)%\s*([\d.]+,\d{2})',
+        texto
+    )
+    if m_tabla:
+        subtotal_val = limpiar_numero(m_tabla.group(1)) or 0
+        iva_val      = limpiar_numero(m_tabla.group(3)) or 0
+        # Total con $ en línea aparte
+        m_total_pesos = re.search(r'\$\s*([\d]{1,3}(?:[.][\d]{3})+[,][\d]{2})', texto)
+        if m_total_pesos:
+            total_leido = limpiar_numero(m_total_pesos.group(1))
+    else:
+        # ── Formato Aglolam: etiquetas explícitas ─────────────────────────────
+        subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
+        iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
+        pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
+        m_total_label = re.search(
+            r'(?i)(?<!sub)total\s*:?\s*\$?\s*([\d]{1,3}(?:[.][\d]{3})+[,][\d]{2})', texto
+        )
+        if m_total_label:
+            total_leido = limpiar_numero(m_total_label.group(1))
+
+    if total_leido:
+        total = total_leido
+    else:
+        total = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+
+    return subtotal_val, iva_val, pers_val, total_leido, total
+
+
 def preparar_imagen(file_obj):
     img = Image.open(file_obj).convert('RGB')
     w, h = img.size
@@ -161,41 +211,28 @@ def ocr():
     app.logger.warning("OCR TEXTO:\n%s", texto)
     
     m_tipo = re.search(PATRONES['tipo_factura'], texto)
-    
     tipo_factura = m_tipo.group(1).upper() if m_tipo else None
 
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
-    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
-    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
-    total_leido = limpiar_numero(extraer_campo(texto, PATRONES['total']))
-
-    if total_leido:
-        total = total_leido
-    else:
-        total = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+    subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
 
     app.logger.warning(
-    "[OCR] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
-    total_leido,
-    subtotal_val,
-    iva_val,
-    pers_val,
-    total)
+        "[OCR] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
+        total_leido, subtotal_val, iva_val, pers_val, total)
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
         'tipo_factura':   tipo_factura,
         'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
-        'subtotal':       limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])),
+        'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
-        'iva':            limpiar_numero(extraer_campo(texto, PATRONES['iva'])),
+        'iva':            iva_val or None,
         'total':          total,
         'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
-        'pers_IIBB':      limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])),
+        'pers_IIBB':      pers_val or None,
         'texto_raw':      texto,
     }
 
@@ -249,27 +286,23 @@ def ocr_pdf():
     m_iva_pct = re.search(PATRONES['iva_pct'], texto)
     iva_pct   = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else None
 
-    subtotal_val = limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])) or 0
-    iva_val      = limpiar_numero(extraer_campo(texto, PATRONES['iva'])) or 0
-    pers_val     = limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])) or 0
-    total_leido  = limpiar_numero(extraer_campo(texto, PATRONES['total']))
+    subtotal_val, iva_val, pers_val, total_leido, total = extraer_totales(texto)
 
-    if total_leido:
-        total = total_leido
-    else:
-        total = round(subtotal_val + iva_val + pers_val, 2) if subtotal_val else None
+    app.logger.warning(
+        "[OCR-PDF] total_leido=%s sub=%s iva=%s pers=%s total_final=%s",
+        total_leido, subtotal_val, iva_val, pers_val, total)
 
     factura = {
         'numero':         extraer_campo(texto, PATRONES['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES['fecha'])),
         'tipo_factura':   tipo_factura,
         'condicion_pago': extraer_campo(texto, PATRONES['condicion_pago']),
-        'subtotal':       limpiar_numero(extraer_campo(texto, PATRONES['subtotal'])),
+        'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
-        'iva':            limpiar_numero(extraer_campo(texto, PATRONES['iva'])),
+        'iva':            iva_val or None,
         'total':          total,
         'moneda':         extraer_campo(texto, PATRONES['moneda']) or 'ARS',
-        'pers_IIBB':      limpiar_numero(extraer_campo(texto, PATRONES['pers_IIBB'])),
+        'pers_IIBB':      pers_val or None,
         'texto_raw':      texto,
     }
 
