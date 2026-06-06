@@ -145,21 +145,33 @@ def parsear_placasur(texto):
 
 # ── Patrones específicos Bonzini ──────────────────────────────────────────────
 PATRONES_BONZINI = {
-    "numero":         r"(\d{4}-\d{8})",
-    "fecha_factura":  r"Fecha de Emision[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "fecha_presup":   r"FECHA[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
-    "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
-    "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "condicion_pago": r"Condici[oó]n(?:es)? de Venta[:\s]*(.+?)(?:\n|$)",
-    "cliente_factura":r"Apellido Nombre/Raz[oó]n Social[:\s]*(.+?)(?:\n|$)",
-    "cliente_presup": r"SE[ÑN]ORES[:\s]*(.+?)(?:\n|$)",
-    "cliente_cuit":   r"CUIT[:\s]*([\d]+-[\d]+-[\d])",
-    "subtotal":       r"Importe Neto Gravado:\$?\s*([\d.]+,\d{2})",
-    "iva":            r"Total Iva:\s*\$?\s*([\d.]+,\d{2})",
-    "total_factura":  r"Importe Total:\s*\$?\s*([\d.]+,\d{2})",
-    "total_presup":   r"TOTAL[:\s]*([\d]+[.,]\d{2})",
-    "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
+    # "0014-00022055" — puede venir con guion simple o largo, OCR confunde O->0
+    "numero":         r"\b(\d{4}[-]\d{8})\b",
+    # "Fecha de Emision:  04/05/2026" — OCR a veces omite tilde
+    "fecha_factura":  r"(?i)Fecha\s+de\s+Emisi[oó]n[:\s]*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
+    "fecha_presup":   r"FECHA[:\s]*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
+    # Tipo: "A" en recuadro junto a FACTURA; Tesseract puede ponerlos en misma linea o separados
+    "tipo_factura":   r"(?i)(?:FACTURA\s*[\n\r\s]*([A-E])\b|\b([A-E])\s*[\n\r\s]*FACTURA)",
+    # "N° de CAE:  86184124509865" — OCR puede producir "N o de CAE" (° → o con espacio)
+    "cae":            r"(?i)N[\s°oº]*(?:de\s+)?CAE[:\s]*([\d]{10,})",
+    # "Fecha de Vto de CAE:  14/05/2026"
+    "cae_vto":        r"(?i)Fecha\s+de\s+Vto\.?\s*(?:de\s+)?CAE[:\s]*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
+    # "Condicion de Venta: A 30 DIAS"
+    "condicion_pago": r"(?i)Condici[oó]n\s+de\s+Venta[:\s]*(.+?)(?:\n|$)",
+    # "Apellido Nombre/Razón Social:  ROQUE DANIEL SRL (F)" — la barra puede variar
+    "cliente_factura":r"(?i)Apellido\s+Nombre.Raz[oó]n\s+Social[:\s]*(.+)",
+    "cliente_presup": r"(?i)SE[NÑ]ORES[:\s]*(.+?)(?:\n|$)",
+    # "CUIT: 30-64986362-4"
+    "cliente_cuit":   r"(?i)CUIT[:\s]*([\d]{2}-[\d]{6,10}-[\d]{1,2})",
+    # "Importe Neto Gravado:$  371812.73" o "371.812,73" — tolerante a formato
+    "subtotal":       r"(?i)Importe\s+Neto\s+Gravado\s*[:\$\s]*([\d.,]+)",
+    # "Total Iva: $  78080.67"
+    "iva":            r"(?i)Total\s+Iva\s*[:\$\s]*([\d.,]+)",
+    # "Importe Total: $  449893.41"
+    "total_factura":  r"(?i)Importe\s+Total\s*[:\$\s]*([\d.,]+)",
+    "total_presup":   r"(?i)TOTAL[:\s]*([\d]+[.,]\d{2})",
+    # "IVA 21,00%:" o "IVA 21.00%"
+    "iva_pct":        r"(?i)IVA\s+(21|10[,.]?5|27)[,.]?\d*\s*%",
 }
 
 def _es_presupuesto_bonzini(texto):
@@ -176,8 +188,14 @@ def _limpiar_num_bonzini(s, es_presup=False):
         except ValueError:
             return None
     else:
-        if re.search(r'\d[.]\d{3}', s) or (s.count(',') == 1 and '.' not in s):
+        # Formato argentino con separador de miles: "371.812,73" -> 371812.73
+        if re.search(r'\d[.]\d{3}', s):
             s = s.replace('.', '').replace(',', '.')
+        # Sin separador de miles, coma decimal: "78080,67" -> 78080.67
+        elif s.count(',') == 1 and '.' not in s:
+            s = s.replace(',', '.')
+        # Sin separador, punto decimal: "449893.41" -> ya ok
+        # Sin separador, sin decimal: limpiar comas residuales
         else:
             s = s.replace(',', '')
         try:
@@ -226,40 +244,61 @@ def extraer_items_bonzini(texto, es_presup=False):
                     "subtotalprod": _limpiar_num_bonzini(m.group(4), True),
                 })
     else:
-        NUM = r'[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}'
+        # Formato factura Bonzini:
+        # Columnas: Producto/Servicio | Despacho | Cantidad | Precio Unit. | Final c/iva
+        # Ej: "EX HBMAN03A MANIJA OVAL CROMO MATE 128mm  50  2260.71  136772.96"
+        # Descuentos negativos: "Desc 10.00% - JUEGO ...  30  -983.07  -35685.33"
+        # Descuento general: "Descuento General 8.68%  1  -35340.94  -42762.54"
+        NUM = r'-?[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}|-?[\d]+[.]\d{2}|-?[\d]+[,]\d{2}'
+        CANT = r'-?\d+(?:[,.]\d+)?'
+
+        # Regex principal: descripcion (incluyendo posible campo despacho pegado) + cant + precio + total
         item_re = re.compile(
-            r'^(.+?)\s+(\d+(?:[,.]\d+)?)\s+(' + NUM + r')\s+(' + NUM + r')\s*$',
+            r'^(.+?)\s+(' + CANT + r')\s+(' + NUM + r')\s+(' + NUM + r')\s*$',
             re.IGNORECASE
         )
-        desc_neg_re = re.compile(
-            r'^(Desc[^\n]*?)\s+(\d+)\s+(-[\d.]+,\d{2})\s+(-[\d.]+,\d{2})\s*$',
-            re.IGNORECASE
+
+        STOP_ITEMS = re.compile(
+            r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|percep|'
+            r'detalle\s+de\s+iva|descuento\s+general\b)',
         )
+
         en_items = False
         for linea_raw in texto.split('\n'):
             linea = linea_raw.strip()
             if not linea:
                 continue
+            # Activar captura al encontrar el encabezado de la tabla
             if re.search(r'(?i)producto[/\s]*servicio', linea):
                 en_items = True
                 continue
             if not en_items:
                 continue
-            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|descuento\s+general\b)', linea):
-                break
-            m_neg = desc_neg_re.match(linea)
-            if m_neg:
+            # Capturar "Descuento General X%" como item especial antes del stop
+            m_dg = re.match(
+                r'^(Descuento\s+General[^\n]*?)\s+(' + CANT + r')\s+(' + NUM + r')\s+(' + NUM + r')\s*$',
+                linea, re.IGNORECASE
+            )
+            if m_dg:
                 items.append({
-                    "codigo": None, "descripcion": m_neg.group(1).strip(),
-                    "cantidad":     _limpiar_num_bonzini(m_neg.group(2)),
-                    "precio_unit":  _limpiar_num_bonzini(m_neg.group(3)),
-                    "subtotalprod": _limpiar_num_bonzini(m_neg.group(4)),
+                    "codigo": None,
+                    "descripcion": m_dg.group(1).strip(),
+                    "cantidad":     _limpiar_num_bonzini(m_dg.group(2)),
+                    "precio_unit":  _limpiar_num_bonzini(m_dg.group(3)),
+                    "subtotalprod": _limpiar_num_bonzini(m_dg.group(4)),
                 })
                 continue
+            if STOP_ITEMS.search(linea):
+                break
             m = item_re.match(linea)
             if m:
+                desc = m.group(1).strip()
+                # Limpiar posible campo "Despacho" pegado al final de la descripción
+                # (Tesseract puede incluirlo; suele ser un código alfanumérico al final)
+                desc = re.sub(r'\s+[A-Z0-9]{5,12}IC\s*$', '', desc).strip()
                 items.append({
-                    "codigo": None, "descripcion": m.group(1).strip(),
+                    "codigo": None,
+                    "descripcion": desc,
                     "cantidad":     _limpiar_num_bonzini(m.group(2)),
                     "precio_unit":  _limpiar_num_bonzini(m.group(3)),
                     "subtotalprod": _limpiar_num_bonzini(m.group(4)),
@@ -280,7 +319,12 @@ def parsear_bonzini(texto):
         iva      = 0.0
         iva_pct  = 0.0
     else:
-        tipo_doc = extraer_campo(texto, PATRONES_BONZINI['tipo_factura'])
+        # tipo_factura tiene dos grupos alternativos — tomar el que no sea None
+        m_tipo = re.search(PATRONES_BONZINI['tipo_factura'], texto)
+        if m_tipo:
+            tipo_doc = next((g for g in m_tipo.groups() if g), None)
+        else:
+            tipo_doc = None
         subtotal = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['subtotal']))
         iva      = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['iva']))
         total    = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['total_factura']))
