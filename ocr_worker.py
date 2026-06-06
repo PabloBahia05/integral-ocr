@@ -157,8 +157,8 @@ PATRONES_BONZINI = {
     "cliente_presup": r"SE[ÑN]ORES[:\s]*(.+?)(?:\n|$)",
     "cliente_cuit":   r"CUIT[:\s]*([\d]+-[\d]+-[\d])",
     # Totales Bonzini usan punto decimal (371812.73), no formato AR
-    "subtotal":       r"(?:Importe Neto Gravado|Sub)\s*[:\$\s]+([\d]+[.,][\d]{2})",
-    "iva":            r"Total\s+Iva\s*[:\$\s]+([\d]+[.,][\d]{2})",
+    "subtotal":       r"Neto Gravado[:\$\s]+([\d]+[.,][\d]{2})",
+    "iva":            r"Tot[a!]+[l!]\s+Iva[:\s\$]+([\d]+[.,][\d]{2})",
     "total_factura":  r"Importe Total[:\s\$]*\s*([\d]+[.,][\d]{2})",
     "total_presup":   r"TOTAL[:\s]*([\d]+[.,]\d{2})",
     "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
