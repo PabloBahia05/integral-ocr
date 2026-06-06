@@ -151,13 +151,15 @@ PATRONES_BONZINI = {
     "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
     "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
     "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "condicion_pago": r"Condici[oó]n(?:es)? de Venta[:\s]*(.+?)(?:\n|$)",
+    # "Condicion de Venta: A 30 DIAS" — evitar capturar "Condicion frente al IVA"
+    "condicion_pago": r"Condici[oó]n de Venta[:\s]*(.+?)(?:\n|$)",
     "cliente_factura":r"Apellido Nombre/Raz[oó]n Social[:\s]*(.+?)(?:\n|$)",
     "cliente_presup": r"SE[ÑN]ORES[:\s]*(.+?)(?:\n|$)",
     "cliente_cuit":   r"CUIT[:\s]*([\d]+-[\d]+-[\d])",
-    "subtotal":       r"Importe Neto Gravado:\$?\s*([\d.]+,\d{2})",
-    "iva":            r"Total Iva:\s*\$?\s*([\d.]+,\d{2})",
-    "total_factura":  r"Importe Total:\s*\$?\s*([\d.]+,\d{2})",
+    # Totales Bonzini usan punto decimal (371812.73), no formato AR
+    "subtotal":       r"(?:Importe Neto Gravado|Sub)[:\s\$]*\s*([\d]+[.,][\d]{2})",
+    "iva":            r"Total Iva[:\s\$]*\s*([\d]+[.,][\d]{2})",
+    "total_factura":  r"Importe Total[:\s\$]*\s*([\d]+[.,][\d]{2})",
     "total_presup":   r"TOTAL[:\s]*([\d]+[.,]\d{2})",
     "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
 }
@@ -166,24 +168,23 @@ def _es_presupuesto_bonzini(texto):
     return bool(re.search(r'(?i)presupuesto', texto)) or bool(re.search(r'\b9997-\d{8}\b', texto))
 
 def _limpiar_num_bonzini(s, es_presup=False):
+    """
+    Bonzini usa punto como decimal en AMBOS documentos (371812.73, 78080.67).
+    Presupuesto: igual.
+    """
     if not s:
         return None
     s = s.strip().replace(' ', '')
-    if es_presup:
-        s = s.replace(',', '')
-        try:
-            return float(s)
-        except ValueError:
-            return None
+    # Si tiene coma como decimal (formato AR: 371.812,73) → convertir
+    if re.search(r'\d[.]\d{3}', s) or (s.count(',') == 1 and '.' not in s):
+        s = s.replace('.', '').replace(',', '.')
     else:
-        if re.search(r'\d[.]\d{3}', s) or (s.count(',') == 1 and '.' not in s):
-            s = s.replace('.', '').replace(',', '.')
-        else:
-            s = s.replace(',', '')
-        try:
-            return float(s)
-        except ValueError:
-            return None
+        # Punto como decimal (371812.73) — eliminar comas si las hay
+        s = s.replace(',', '')
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 def extraer_items_bonzini(texto, es_presup=False):
     items = []
@@ -226,13 +227,21 @@ def extraer_items_bonzini(texto, es_presup=False):
                     "subtotalprod": _limpiar_num_bonzini(m.group(4), True),
                 })
     else:
-        NUM = r'[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}'
+        # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
+        # Números con punto decimal: 6079.04  14711.28
+        NUM_F = r'-?[\d]+(?:[.][\d]+)?'
         item_re = re.compile(
-            r'^(.+?)\s+(\d+(?:[,.]\d+)?)\s+(' + NUM + r')\s+(' + NUM + r')\s*$',
+            r'^(.+?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
+        # Descuento: "Desc 10.00% - JUEGO..." cantidad precio_neg total_neg
         desc_neg_re = re.compile(
-            r'^(Desc[^\n]*?)\s+(\d+)\s+(-[\d.]+,\d{2})\s+(-[\d.]+,\d{2})\s*$',
+            r'^(Desc[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
+            re.IGNORECASE
+        )
+        # Descuento general: "Descuento General 8.68%" cantidad precio total
+        desc_gen_re = re.compile(
+            r'^(Descuento\s+General[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
         en_items = False
@@ -245,8 +254,19 @@ def extraer_items_bonzini(texto, es_presup=False):
                 continue
             if not en_items:
                 continue
-            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|descuento\s+general\b)', linea):
+            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto)', linea):
                 break
+            # Descuento general
+            m_gen = desc_gen_re.match(linea)
+            if m_gen:
+                items.append({
+                    "codigo": None, "descripcion": m_gen.group(1).strip(),
+                    "cantidad":     _limpiar_num_bonzini(m_gen.group(2)),
+                    "precio_unit":  _limpiar_num_bonzini(m_gen.group(3)),
+                    "subtotalprod": _limpiar_num_bonzini(m_gen.group(4)),
+                })
+                continue
+            # Descuento por ítem
             m_neg = desc_neg_re.match(linea)
             if m_neg:
                 items.append({
@@ -256,6 +276,7 @@ def extraer_items_bonzini(texto, es_presup=False):
                     "subtotalprod": _limpiar_num_bonzini(m_neg.group(4)),
                 })
                 continue
+            # Ítem normal
             m = item_re.match(linea)
             if m:
                 items.append({
