@@ -38,6 +38,7 @@ PROVEEDORES = {
     "placasur":  re.compile(r'(?i)placasur|DISTRIBUIDORA PLACASUR'),
     "cantochap": re.compile(r'(?i)cantochap'),
     "aglolam":   re.compile(r'(?i)aglolam'),
+    "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI'),
 }
 
 def detectar_proveedor(texto):
@@ -140,6 +141,173 @@ def parsear_placasur(texto):
         'texto_raw':      texto,
     }
     items = extraer_items_placasur(texto)
+    return factura, items
+
+# ── Patrones específicos Bonzini ──────────────────────────────────────────────
+PATRONES_BONZINI = {
+    "numero":         r"(\d{4}-\d{8})",
+    "fecha_factura":  r"Fecha de Emision[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
+    "fecha_presup":   r"FECHA[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
+    "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
+    "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"Condici[oó]n(?:es)? de Venta[:\s]*(.+?)(?:\n|$)",
+    "cliente_factura":r"Apellido Nombre/Raz[oó]n Social[:\s]*(.+?)(?:\n|$)",
+    "cliente_presup": r"SE[ÑN]ORES[:\s]*(.+?)(?:\n|$)",
+    "cliente_cuit":   r"CUIT[:\s]*([\d]+-[\d]+-[\d])",
+    "subtotal":       r"Importe Neto Gravado:\$?\s*([\d.]+,\d{2})",
+    "iva":            r"Total Iva:\s*\$?\s*([\d.]+,\d{2})",
+    "total_factura":  r"Importe Total:\s*\$?\s*([\d.]+,\d{2})",
+    "total_presup":   r"TOTAL[:\s]*([\d]+[.,]\d{2})",
+    "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
+}
+
+def _es_presupuesto_bonzini(texto):
+    return bool(re.search(r'(?i)presupuesto', texto)) or bool(re.search(r'\b9997-\d{8}\b', texto))
+
+def _limpiar_num_bonzini(s, es_presup=False):
+    if not s:
+        return None
+    s = s.strip().replace(' ', '')
+    if es_presup:
+        s = s.replace(',', '')
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    else:
+        if re.search(r'\d[.]\d{3}', s) or (s.count(',') == 1 and '.' not in s):
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '')
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+def extraer_items_bonzini(texto, es_presup=False):
+    items = []
+    if es_presup:
+        NUM_P = r'-?[\d]+[.,][\d]{2}'
+        item_re = re.compile(
+            r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$'
+        )
+        desc_re = re.compile(
+            r'^(Descuento\s+General[^\n]*?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$',
+            re.IGNORECASE
+        )
+        en_items = False
+        for linea_raw in texto.split('\n'):
+            linea = linea_raw.strip()
+            if not linea:
+                continue
+            if re.search(r'(?i)^(cantidad|descripci[oó]n)', linea):
+                en_items = True
+                continue
+            if not en_items:
+                continue
+            if re.search(r'(?i)^(observaciones|total\b)', linea):
+                break
+            m_d = desc_re.match(linea)
+            if m_d:
+                items.append({
+                    "codigo": None, "descripcion": m_d.group(1).strip(),
+                    "cantidad": 1,
+                    "precio_unit":  _limpiar_num_bonzini(m_d.group(2), True),
+                    "subtotalprod": _limpiar_num_bonzini(m_d.group(3), True),
+                })
+                continue
+            m = item_re.match(linea)
+            if m:
+                items.append({
+                    "codigo": None, "descripcion": m.group(2).strip(),
+                    "cantidad":     _limpiar_num_bonzini(m.group(1), True),
+                    "precio_unit":  _limpiar_num_bonzini(m.group(3), True),
+                    "subtotalprod": _limpiar_num_bonzini(m.group(4), True),
+                })
+    else:
+        NUM = r'[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}'
+        item_re = re.compile(
+            r'^(.+?)\s+(\d+(?:[,.]\d+)?)\s+(' + NUM + r')\s+(' + NUM + r')\s*$',
+            re.IGNORECASE
+        )
+        desc_neg_re = re.compile(
+            r'^(Desc[^\n]*?)\s+(\d+)\s+(-[\d.]+,\d{2})\s+(-[\d.]+,\d{2})\s*$',
+            re.IGNORECASE
+        )
+        en_items = False
+        for linea_raw in texto.split('\n'):
+            linea = linea_raw.strip()
+            if not linea:
+                continue
+            if re.search(r'(?i)producto[/\s]*servicio', linea):
+                en_items = True
+                continue
+            if not en_items:
+                continue
+            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|descuento\s+general\b)', linea):
+                break
+            m_neg = desc_neg_re.match(linea)
+            if m_neg:
+                items.append({
+                    "codigo": None, "descripcion": m_neg.group(1).strip(),
+                    "cantidad":     _limpiar_num_bonzini(m_neg.group(2)),
+                    "precio_unit":  _limpiar_num_bonzini(m_neg.group(3)),
+                    "subtotalprod": _limpiar_num_bonzini(m_neg.group(4)),
+                })
+                continue
+            m = item_re.match(linea)
+            if m:
+                items.append({
+                    "codigo": None, "descripcion": m.group(1).strip(),
+                    "cantidad":     _limpiar_num_bonzini(m.group(2)),
+                    "precio_unit":  _limpiar_num_bonzini(m.group(3)),
+                    "subtotalprod": _limpiar_num_bonzini(m.group(4)),
+                })
+    return items
+
+def parsear_bonzini(texto):
+    es_presup = _es_presupuesto_bonzini(texto)
+    fecha_raw = extraer_campo(texto, PATRONES_BONZINI['fecha_factura']) \
+                or extraer_campo(texto, PATRONES_BONZINI['fecha_presup'])
+    cliente = extraer_campo(texto, PATRONES_BONZINI['cliente_factura']) \
+              or extraer_campo(texto, PATRONES_BONZINI['cliente_presup'])
+    if es_presup:
+        tipo_doc = "Presupuesto"
+        total_raw = extraer_campo(texto, PATRONES_BONZINI['total_presup'])
+        total    = _limpiar_num_bonzini(total_raw, True)
+        subtotal = total
+        iva      = 0.0
+        iva_pct  = 0.0
+    else:
+        tipo_doc = extraer_campo(texto, PATRONES_BONZINI['tipo_factura'])
+        subtotal = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['subtotal']))
+        iva      = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['iva']))
+        total    = _limpiar_num_bonzini(extraer_campo(texto, PATRONES_BONZINI['total_factura']))
+        m_iva_pct = re.search(PATRONES_BONZINI['iva_pct'], texto)
+        iva_pct  = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
+        if not total and subtotal:
+            total = round((subtotal or 0) + (iva or 0), 2)
+    factura = {
+        'proveedor':      'bonzini',
+        'es_presupuesto': es_presup,
+        'numero':         extraer_campo(texto, PATRONES_BONZINI['numero']),
+        'fecha':          normalizar_fecha(fecha_raw),
+        'tipo_factura':   tipo_doc,
+        'cae':            None if es_presup else extraer_campo(texto, PATRONES_BONZINI['cae']),
+        'cae_vto':        None if es_presup else normalizar_fecha(extraer_campo(texto, PATRONES_BONZINI['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_BONZINI['condicion_pago']) or '').strip(),
+        'cliente_nombre': (cliente or '').strip(),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_BONZINI['cliente_cuit']),
+        'subtotal':       subtotal or None,
+        'iva_pct':        iva_pct,
+        'iva':            iva,
+        'pers_IIBB':      None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_bonzini(texto, es_presup)
     return factura, items
 
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
@@ -344,6 +512,8 @@ def ocr():
 
     if proveedor == 'placasur':
         factura, items = parsear_placasur(texto)
+    elif proveedor == 'bonzini':
+        factura, items = parsear_bonzini(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -417,6 +587,8 @@ def ocr_pdf():
 
     if proveedor == 'placasur':
         factura, items = parsear_placasur(texto)
+    elif proveedor == 'bonzini':
+        factura, items = parsear_bonzini(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
