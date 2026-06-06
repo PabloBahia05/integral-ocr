@@ -499,6 +499,7 @@ def preparar_imagen(file_obj):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.post('/ocr')
+@app.post('/ocr-preview')
 def ocr():
     if 'imagen' not in request.files:
         return jsonify({'error': 'No se recibió imagen'}), 400
