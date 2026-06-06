@@ -229,24 +229,24 @@ def extraer_items_bonzini(texto, es_presup=False):
     else:
         # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
         # Números con punto decimal: 6079.04  14711.28
+        # Líneas pueden empezar con | o H (ruido OCR)
         NUM_F = r'-?[\d]+(?:[.][\d]+)?'
         item_re = re.compile(
             r'^(.+?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
-        # Descuento: "Desc 10.00% - JUEGO..." cantidad precio_neg total_neg
         desc_neg_re = re.compile(
-            r'^(Desc[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
+            r'^(Desc\s+[\d.]+%[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
-        # Descuento general: "Descuento General 8.68%" cantidad precio total
         desc_gen_re = re.compile(
             r'^(Descuento\s+General[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
         en_items = False
         for linea_raw in texto.split('\n'):
-            linea = linea_raw.strip()
+            # Limpiar prefijos de ruido OCR: | H
+            linea = re.sub(r'^[|H\s]+', '', linea_raw).strip()
             if not linea:
                 continue
             if re.search(r'(?i)producto[/\s]*servicio', linea):
@@ -254,7 +254,7 @@ def extraer_items_bonzini(texto, es_presup=False):
                 continue
             if not en_items:
                 continue
-            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto)', linea):
+            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|neto\s+gravado)', linea):
                 break
             # Descuento general
             m_gen = desc_gen_re.match(linea)
@@ -279,8 +279,12 @@ def extraer_items_bonzini(texto, es_presup=False):
             # Ítem normal
             m = item_re.match(linea)
             if m:
+                desc = m.group(1).strip()
+                # Ignorar líneas que son claramente ruido (solo números, códigos cortos, etc.)
+                if re.match(r'^[\d\s]+$', desc) or len(desc) < 4:
+                    continue
                 items.append({
-                    "codigo": None, "descripcion": m.group(1).strip(),
+                    "codigo": None, "descripcion": desc,
                     "cantidad":     _limpiar_num_bonzini(m.group(2)),
                     "precio_unit":  _limpiar_num_bonzini(m.group(3)),
                     "subtotalprod": _limpiar_num_bonzini(m.group(4)),
