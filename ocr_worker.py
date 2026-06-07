@@ -197,13 +197,10 @@ def extraer_items_bonzini(texto, es_presup=False):
             r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$'
         )
         desc_re = re.compile(
-            r'^(Descuento\s+General[^\n]*?)\s+(' + NUM_P + r')\s+[\S]*\s*(' + NUM_P + r')\s*$',
+            r'^(?:\d+\s+)?(Descuento\s+General[^-]*?)(?:\s+.*?)?(-[\d]+[.,][\d]{2})\s+(-[\d]+[.,][\d]{2})\s*$',
             re.IGNORECASE
         )
-        desc_re2 = re.compile(
-            r'^(Descuento\s+General[^\n]*?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$',
-            re.IGNORECASE
-        )
+        desc_re2 = desc_re
         IGNORAR_PRESUP = re.compile(
             r'(?i)^(se[ñn]ores|domicilio|iva:|condicion|fecha|presupuesto|'
             r'n[°º]|ped|observ|total\b|remito|bahia|cuit|cantidad|descripci)'
@@ -217,7 +214,7 @@ def extraer_items_bonzini(texto, es_presup=False):
             # Descuento general (puede tener ruido entre precio e importe)
             m_d = desc_re.match(linea) or desc_re2.match(linea)
             if m_d:
-                desc_limpia = re.sub(r'[\s.\-=%]+$', '', m_d.group(1)).strip()
+                desc_limpia = re.sub(r'[\s.\-=%\d]+$', '', m_d.group(1)).strip()
                 items.append({
                     "codigo": None, "descripcion": desc_limpia,
                     "cantidad": 1,
