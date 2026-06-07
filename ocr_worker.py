@@ -229,7 +229,7 @@ def extraer_items_bonzini(texto, es_presup=False):
     else:
         # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
         # Números con punto decimal: 6079.04  14711.28
-        # Líneas pueden empezar con | o H (ruido OCR)
+        # El OCR mezcla líneas — capturar directamente por patrón sin esperar header
         NUM_F = r'-?[\d]+(?:[.][\d]+)?'
         item_re = re.compile(
             r'^(.+?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
@@ -243,19 +243,19 @@ def extraer_items_bonzini(texto, es_presup=False):
             r'^(Descuento\s+General[^\n]*?)\s+(\d+)\s+(' + NUM_F + r')\s+(' + NUM_F + r')\s*$',
             re.IGNORECASE
         )
-        en_items = False
+        # Líneas a ignorar aunque matcheen el patrón
+        IGNORAR_RE = re.compile(
+            r'(?i)^(cuit|condici|domicilio|fecha|ingresos|responsable|'
+            r'para[ná]|villa|cod\.|ped|herrajes|observ|otros|percep|'
+            r'detalle|importe|neto|sub:|iva|los\s+cambios|coronel|'
+            r'\d{3}\s+\d{3})',
+        )
         for linea_raw in texto.split('\n'):
-            # Limpiar prefijos de ruido OCR: | H
             linea = re.sub(r'^[|H\s]+', '', linea_raw).strip()
-            if not linea:
+            if not linea or len(linea) < 5:
                 continue
-            if re.search(r'(?i)producto[/\s]*servicio', linea):
-                en_items = True
+            if IGNORAR_RE.match(linea):
                 continue
-            if not en_items:
-                continue
-            if re.search(r'(?i)^(observaciones|otros\s+tributos|importe\s+neto|neto\s+gravado)', linea):
-                break
             # Descuento general
             m_gen = desc_gen_re.match(linea)
             if m_gen:
@@ -280,8 +280,7 @@ def extraer_items_bonzini(texto, es_presup=False):
             m = item_re.match(linea)
             if m:
                 desc = m.group(1).strip()
-                # Ignorar líneas que son claramente ruido (solo números, códigos cortos, etc.)
-                if re.match(r'^[\d\s]+$', desc) or len(desc) < 4:
+                if len(desc) < 5 or re.match(r'^[\d\s.]+$', desc):
                     continue
                 items.append({
                     "codigo": None, "descripcion": desc,
