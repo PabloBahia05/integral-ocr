@@ -147,7 +147,7 @@ def parsear_placasur(texto):
 PATRONES_BONZINI = {
     "numero":         r"(\d{4}-\d{8})",
     "fecha_factura":  r"Fecha de Emision[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "fecha_presup":   r"FECHA[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
+    "fecha_presup":   r"FECHA[:\s—\-]+(\d{1,2}/\d{1,2}/\d{4})",
     "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
     "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
     "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
@@ -217,8 +217,9 @@ def extraer_items_bonzini(texto, es_presup=False):
             # Descuento general (puede tener ruido entre precio e importe)
             m_d = desc_re.match(linea) or desc_re2.match(linea)
             if m_d:
+                desc_limpia = re.sub(r'[\s.\-=%]+$', '', m_d.group(1)).strip()
                 items.append({
-                    "codigo": None, "descripcion": m_d.group(1).strip(),
+                    "codigo": None, "descripcion": desc_limpia,
                     "cantidad": 1,
                     "precio_unit":  _limpiar_num_bonzini(m_d.group(2)),
                     "subtotalprod": _limpiar_num_bonzini(m_d.group(3)),
