@@ -228,12 +228,37 @@ def extraer_items_bonzini(texto, es_presup=False):
                 desc = m.group(2).strip()
                 if len(desc) < 3:
                     continue
+                cant  = _limpiar_num_bonzini(m.group(1))
+                precio = _limpiar_num_bonzini(m.group(3))
+                subtotal = _limpiar_num_bonzini(m.group(4))
+                # Si el importe está corrupto, calcularlo
+                if subtotal is None and cant and precio:
+                    subtotal = round(cant * precio, 2)
                 items.append({
                     "codigo": None, "descripcion": desc,
-                    "cantidad":     _limpiar_num_bonzini(m.group(1)),
-                    "precio_unit":  _limpiar_num_bonzini(m.group(3)),
-                    "subtotalprod": _limpiar_num_bonzini(m.group(4)),
+                    "cantidad":     cant,
+                    "precio_unit":  precio,
+                    "subtotalprod": subtotal,
                 })
+                continue
+            # Fallback: línea con cantidad, descripción y precio pero importe corrupto
+            # Formato: "2 DESCRIPCION 65279.98 : texto_corrupto"
+            NUM_P2 = r'[\d]+[.,][\d]{2}'
+            m_fb = re.match(
+                r'^(\d+)\s+(.{5,}?)\s+(' + NUM_P2 + r')\s*[:\|]',
+                linea
+            )
+            if m_fb:
+                desc = m_fb.group(2).strip()
+                cant = _limpiar_num_bonzini(m_fb.group(1))
+                precio = _limpiar_num_bonzini(m_fb.group(3))
+                if cant and precio and len(desc) >= 3:
+                    items.append({
+                        "codigo": None, "descripcion": desc,
+                        "cantidad":     cant,
+                        "precio_unit":  precio,
+                        "subtotalprod": round(cant * precio, 2),
+                    })
     else:
         # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
         # Números con punto decimal: 6079.04  14711.28
