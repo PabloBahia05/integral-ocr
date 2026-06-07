@@ -197,7 +197,7 @@ def extraer_items_bonzini(texto, es_presup=False):
             r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$'
         )
         desc_re = re.compile(
-            r'^(?:\d+\s+)?(Descuento\s+General[^-]*?)(?:\s+.*?)?(-[\d]+[.,][\d]{2})\s+(-[\d]+[.,][\d]{2})\s*$',
+            r'^(?:\d+\s+)?(Descuento\s+General).*?(-[\d]+[.,][\d]{2})\s+(-[\d]+[.,][\d]{2})\s*$',
             re.IGNORECASE
         )
         desc_re2 = desc_re
