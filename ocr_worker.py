@@ -38,7 +38,7 @@ PROVEEDORES = {
     "placasur":  re.compile(r'(?i)placasur|DISTRIBUIDORA PLACASUR'),
     "cantochap": re.compile(r'(?i)cantochap'),
     "aglolam":   re.compile(r'(?i)aglolam'),
-    "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI'),
+    "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI|\b9997-\d{8}\b'),
 }
 
 def detectar_proveedor(texto):
@@ -160,7 +160,7 @@ PATRONES_BONZINI = {
     "subtotal":       r"Neto Gravado[:\$\s]+([\d]+[.,][\d]{2})",
     "iva":            r"Tot[a!]+[l!]\s+Iva[:\s\$]+([\d]+[.,][\d]{2})",
     "total_factura":  r"Importe Total[:\s\$]*\s*([\d]+[.,][\d]{2})",
-    "total_presup":   r"TOTAL[:\s]*([\d]+[.,]\d{2})",
+    "total_presup":   r"TOTAL[:\s]+([\d]+[.,][\d]{2})",
     "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
 }
 
@@ -191,40 +191,50 @@ def extraer_items_bonzini(texto, es_presup=False):
     if es_presup:
         NUM_P = r'-?[\d]+[.,][\d]{2}'
         item_re = re.compile(
+            r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+[\S]*\s*(' + NUM_P + r')\s*$'
+        )
+        item_re2 = re.compile(
             r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$'
         )
         desc_re = re.compile(
+            r'^(Descuento\s+General[^\n]*?)\s+(' + NUM_P + r')\s+[\S]*\s*(' + NUM_P + r')\s*$',
+            re.IGNORECASE
+        )
+        desc_re2 = re.compile(
             r'^(Descuento\s+General[^\n]*?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$',
             re.IGNORECASE
         )
-        en_items = False
+        IGNORAR_PRESUP = re.compile(
+            r'(?i)^(se[ñn]ores|domicilio|iva:|condicion|fecha|presupuesto|'
+            r'n[°º]|ped|observ|total\b|remito|bahia|cuit|cantidad|descripci)'
+        )
         for linea_raw in texto.split('\n'):
-            linea = linea_raw.strip()
-            if not linea:
+            linea = re.sub(r'^[\s|]+', '', linea_raw).strip()
+            if not linea or len(linea) < 5:
                 continue
-            if re.search(r'(?i)^(cantidad|descripci[oó]n)', linea):
-                en_items = True
+            if IGNORAR_PRESUP.match(linea):
                 continue
-            if not en_items:
-                continue
-            if re.search(r'(?i)^(observaciones|total\b)', linea):
-                break
-            m_d = desc_re.match(linea)
+            # Descuento general (puede tener ruido entre precio e importe)
+            m_d = desc_re.match(linea) or desc_re2.match(linea)
             if m_d:
                 items.append({
                     "codigo": None, "descripcion": m_d.group(1).strip(),
                     "cantidad": 1,
-                    "precio_unit":  _limpiar_num_bonzini(m_d.group(2), True),
-                    "subtotalprod": _limpiar_num_bonzini(m_d.group(3), True),
+                    "precio_unit":  _limpiar_num_bonzini(m_d.group(2)),
+                    "subtotalprod": _limpiar_num_bonzini(m_d.group(3)),
                 })
                 continue
-            m = item_re.match(linea)
+            # Ítem normal
+            m = item_re.match(linea) or item_re2.match(linea)
             if m:
+                desc = m.group(2).strip()
+                if len(desc) < 3:
+                    continue
                 items.append({
-                    "codigo": None, "descripcion": m.group(2).strip(),
-                    "cantidad":     _limpiar_num_bonzini(m.group(1), True),
-                    "precio_unit":  _limpiar_num_bonzini(m.group(3), True),
-                    "subtotalprod": _limpiar_num_bonzini(m.group(4), True),
+                    "codigo": None, "descripcion": desc,
+                    "cantidad":     _limpiar_num_bonzini(m.group(1)),
+                    "precio_unit":  _limpiar_num_bonzini(m.group(3)),
+                    "subtotalprod": _limpiar_num_bonzini(m.group(4)),
                 })
     else:
         # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
