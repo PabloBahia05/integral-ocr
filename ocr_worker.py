@@ -39,6 +39,7 @@ PROVEEDORES = {
     "cantochap": re.compile(r'(?i)cantochap'),
     "aglolam":   re.compile(r'(?i)aglolam'),
     "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI|\b9997-\d{8}\b'),
+    "inomax":    re.compile(r'(?is)inomax|herrajesinomax|STAAL\s+S\.A\.S|(?=.*Subtotal Neto:)(?=.*CAE\s*Nro:)'),
 }
 
 def detectar_proveedor(texto):
@@ -367,6 +368,119 @@ def parsear_bonzini(texto):
     items = extraer_items_bonzini(texto, es_presup)
     return factura, items
 
+# ── Patrones específicos INOMAX ───────────────────────────────────────────────
+# INOMAX usa PUNTO como separador decimal y SIN separador de miles (9933.00,
+# 72204.36), a diferencia del resto de los proveedores que usan formato AR.
+# El "Factura A/B/C" y el logo están renderizados como imagen en el PDF, por lo
+# que pdfplumber no los extrae como texto — tipo_factura queda en None.
+PATRONES_INOMAX = {
+    "numero":         r"(\d{5}-\d{8})",
+    "fecha":          r"(?i)(\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4})",
+    "condicion_pago": r"(?i)Condici[oó]n de Venta:\s*(.+?)(?:\n|$)",
+    "cliente_nombre": r"(?i)Raz[oó]n Social:\s*(.+?)(?:\n|$)",
+    "cliente_cuit":   r"(?i)\bCUIT:\s*([\d-]+)",
+    "pedido":         r"(?i)Pedido:\s*([\d]+)",
+    "subtotal":       r"(?i)Subtotal Neto:\s*\$?\s*([\d.]+)",
+    "iva_pct":        r"(?i)IVA\s+(21|10[,.]?5|27)\s*%",
+    "iva":            r"(?i)IVA\s+(?:21|10[,.]?5|27)\s*%:\s*\$?\s*([\d.]+)",
+    "pers_IIBB":      r"(?i)Percepci[oó]n IIBB:\s*\$?\s*([\d.]+)",
+    "total":          r"(?i)Importe Total:\s*\$?\s*([\d.]+)",
+    "cae":            r"(?i)CAE\s*Nro:\s*([\d]+)",
+    "cae_vto":        r"(?i)Fecha Vto\.\s*CAE:\s*(\d{1,2}/\d{1,2}/\d{4})",
+}
+
+_NUM_INOMAX  = r'[\d]+\.\d{2}'
+_CANT_INOMAX = r'\d+(?:[.,]\d+)?'
+
+# Ítem INOMAX: CODIGO(pegado a veces con la descripción) DESCRIPCION CANTIDADUNI P.Unit %Bon Importe
+# Ej: "IM4008 Bisagra Pared ViCromado - Con Bisel 4UNI 9933.00 20.00 39732.00"
+#     "LNR03-1Mampara Frontal Alum Negro 1UNI 72204.36 20.00 72204.36"   (código y desc. sin espacio)
+#     "IM6006-Corrediza FrontaNEGRO 1UNI 54424.41 20.00 54424.41"       (código y desc. sin espacio)
+ITEM_RE_INOMAX = re.compile(
+    r'^([A-Z0-9]+(?:-\d+)?)'          # codigo
+    r'(.*?)\s*'                       # descripcion (puede venir pegada al código)
+    r'(' + _CANT_INOMAX + r')\s*UNI\s+'  # cantidad + UNI (a veces pegado)
+    r'(' + _NUM_INOMAX + r')\s+'      # precio unitario (valorlista/precio_unit)
+    r'(' + _NUM_INOMAX + r')\s+'      # % bonificación
+    r'(' + _NUM_INOMAX + r')'         # importe
+    r'\s*$',
+    re.IGNORECASE
+)
+
+STOP_RE_INOMAX = re.compile(
+    r'(?i)^(codigo\s+descripci|subtotal|bonificaci[oó]n|iva\s|percepci[oó]n|'
+    r'importe\s+total|son\s+pesos|tipo\s+de\s+cambio|cae\s+nro)'
+)
+
+
+def _limpiar_num_inomax(s):
+    """INOMAX usa punto decimal sin separador de miles (ej: 166360.77)."""
+    if not s:
+        return None
+    s = s.strip().replace(' ', '').replace('$', '')
+    if ',' in s and '.' in s:
+        # formato con miles tipo 1,234.56
+        s = s.replace(',', '')
+    elif ',' in s and '.' not in s:
+        s = s.replace(',', '.')
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def extraer_items_inomax(texto):
+    items = []
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea or STOP_RE_INOMAX.match(linea):
+            continue
+        m = ITEM_RE_INOMAX.match(linea)
+        if m:
+            desc = m.group(2).strip().lstrip('-').strip()
+            items.append({
+                "codigo":       m.group(1),
+                "descripcion":  desc,
+                "cantidad":     _limpiar_num_inomax(m.group(3)),
+                "precio_unit":  _limpiar_num_inomax(m.group(4)),
+                "bonif_pct":    _limpiar_num_inomax(m.group(5)),
+                "subtotalprod": _limpiar_num_inomax(m.group(6)),
+            })
+    return items
+
+
+def parsear_inomax(texto):
+    subtotal = _limpiar_num_inomax(extraer_campo(texto, PATRONES_INOMAX['subtotal']))
+    iva      = _limpiar_num_inomax(extraer_campo(texto, PATRONES_INOMAX['iva']))
+    pers     = _limpiar_num_inomax(extraer_campo(texto, PATRONES_INOMAX['pers_IIBB']))
+    total    = _limpiar_num_inomax(extraer_campo(texto, PATRONES_INOMAX['total']))
+    if not total and subtotal:
+        total = round((subtotal or 0) + (iva or 0) + (pers or 0), 2)
+    m_iva_pct = re.search(PATRONES_INOMAX['iva_pct'], texto)
+    iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
+    factura = {
+        'proveedor':      'inomax',
+        'numero':         extraer_campo(texto, PATRONES_INOMAX['numero']),
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_INOMAX['fecha'])),
+        'tipo_factura':   None,  # se renderiza como imagen/logo, no está en el texto extraído
+        'cae':            extraer_campo(texto, PATRONES_INOMAX['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_INOMAX['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_INOMAX['condicion_pago']) or '').strip(),
+        'cliente_nombre': (extraer_campo(texto, PATRONES_INOMAX['cliente_nombre']) or '').strip(),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_INOMAX['cliente_cuit']),
+        'pedido':         extraer_campo(texto, PATRONES_INOMAX['pedido']),
+        'subtotal':       subtotal or None,
+        'iva_pct':        iva_pct,
+        'iva':            iva or None,
+        'pers_IIBB':      pers or None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_inomax(texto)
+    return factura, items
+
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -572,6 +686,8 @@ def ocr():
         factura, items = parsear_placasur(texto)
     elif proveedor == 'bonzini':
         factura, items = parsear_bonzini(texto)
+    elif proveedor == 'inomax':
+        factura, items = parsear_inomax(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -647,6 +763,8 @@ def ocr_pdf():
         factura, items = parsear_placasur(texto)
     elif proveedor == 'bonzini':
         factura, items = parsear_bonzini(texto)
+    elif proveedor == 'inomax':
+        factura, items = parsear_inomax(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
