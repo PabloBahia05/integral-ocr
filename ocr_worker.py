@@ -40,6 +40,7 @@ PROVEEDORES = {
     "aglolam":   re.compile(r'(?i)aglolam'),
     "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI|\b9997-\d{8}\b'),
     "inomax":    re.compile(r'(?is)inomax|herrajesinomax|STAAL\s+S\.A\.S|(?=.*Subtotal Neto:)(?=.*CAE\s*Nro:)'),
+    "intervidrio": re.compile(r'(?i)intervidrio|LA CASA DE LOS CRISTALES'),
 }
 
 def detectar_proveedor(texto):
@@ -481,6 +482,138 @@ def parsear_inomax(texto):
     return factura, items
 
 
+# ── Patrones específicos Intervidrio (La Casa de los Cristales) ──────────────
+# Formato de ítem, todo en una sola línea impresa:
+# "2,00HO Templado Float Incoloro 8 mm 0,393 x 1,900 1,49 109.696,13 163.447,23"
+# donde: cantidad_hojas | descripcion | ancho x largo | cantidad_m2 | precio_unit | importe
+# La descripcion puede continuar en líneas siguientes sin datos numéricos
+# (ej. "segun dibujo", "Paño fijo").
+NUM_ARG_INTERVIDRIO = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
+# Tolera el error típico de Tesseract "37.091 ,86" (espacio antes de la coma)
+NUM_ARG_INTERVIDRIO_OCR = r'\d{1,3}(?:[.]\d{3})*\s?,\s?\d{2}'
+CANT_PAT_INTERVIDRIO = r'\d+[,.]\d{1,3}'
+
+PATRONES_INTERVIDRIO = {
+    "numero":         r"(?i)factura\s+[a-z]\s+(\d{4,5}\s*[-–]\s*\d{5,8})",
+    "fecha":          r"(?i)fecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "vencimiento":    r"(?i)fecha\s+de\s+vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r"(?i)factura\s+([A-Z])\b",
+    "cae":            r"(?i)C\.?A\.?E\.?\s*N[°º]?\s*(\d+)",
+    "condicion_pago": r"(?i)condici[oóé]n de venta:\s*(.+?)(?:\n|$)",
+    "cliente_nombre": None,  # aparece antes de "Dirección:", se toma con extraer_cliente_intervidrio
+    "cliente_cuit":   r"(?i)C\.U\.I\.T\.:\s*([\d-]+)",
+    "iva_pct":        r'(\d{1,2}[,.]\d{2})\s*%',
+}
+
+ITEM_RE_INTERVIDRIO = re.compile(
+    r'^(\d+[,.]\d{2})\s*HO\s+'                                    # cantidad de hojas/bultos, ej "2,00HO"
+    r'(.+?)\s+'                                                   # descripcion
+    r'(\d+[,.]\d{3})\s*[.,]?\s*[xX]\s*(\d+[,.]\d{3})\s+'          # ancho x largo
+    r'(' + CANT_PAT_INTERVIDRIO + r')\s+'                          # cantidad m2
+    r'(' + NUM_ARG_INTERVIDRIO + r')\s+'                           # precio unit
+    r'(' + NUM_ARG_INTERVIDRIO + r')\s*$',                         # importe
+    re.IGNORECASE
+)
+
+# Líneas de cabecera/pie que jamás son continuación de descripción de un ítem
+STOP_RE_INTERVIDRIO = re.compile(
+    r'(?i)subtotal|conformidad|percep|impuesto|r[eé]gimen|c\.a\.e|'
+    r'condiciones\s+generales|vidrio\s+seguro|alcance:|entrega\s+de|'
+    r'redeterminaci|direcci[oó]n\s+comercial|observaciones|cuenta\s+n|'
+    r'----pagina----|descripci[oó]n.*ancho|climanet|quanex|\bvasa\b|'
+    r'condici[oó]n\s+de\s+(?:venta|pago)|remito'
+)
+
+# Fila de totales, ej:
+# "1.159.120,71 0,00 1.159.120,71 243.415,35 37.091,86 1.439.627,92"
+# columnas: Subtotal | Impuesto | Subtotal | IVA | Regimenes Esp.(percepciones) | Total
+TOTALS_ROW_RE_INTERVIDRIO = re.compile(
+    r'(' + NUM_ARG_INTERVIDRIO_OCR + r')\s+(' + NUM_ARG_INTERVIDRIO_OCR + r')\s+(' + NUM_ARG_INTERVIDRIO_OCR + r')\s+'
+    r'(' + NUM_ARG_INTERVIDRIO_OCR + r')\s+(' + NUM_ARG_INTERVIDRIO_OCR + r')\s+(' + NUM_ARG_INTERVIDRIO_OCR + r')'
+)
+
+
+def extraer_items_intervidrio(texto):
+    items = []
+    current = None
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea:
+            continue
+        m = ITEM_RE_INTERVIDRIO.match(linea)
+        if m:
+            current = {
+                "codigo":       None,
+                "descripcion":  m.group(2).strip(),
+                "ancho":        limpiar_numero(m.group(3)),
+                "largo":        limpiar_numero(m.group(4)),
+                "cantidad":     limpiar_numero(m.group(5)),
+                "precio_unit":  limpiar_numero(m.group(6)),
+                "subtotalprod": limpiar_numero(m.group(7)),
+            }
+            items.append(current)
+            continue
+        if STOP_RE_INTERVIDRIO.search(linea):
+            current = None  # a partir de acá no hay más continuaciones de descripcion
+            continue
+        # linea de continuacion de descripcion (ej "segun dibujo", "Paño fijo")
+        if current and re.match(r'^[A-Za-zÁÉÍÓÚÑáéíóúñ.\s]{2,40}$', linea) and len(linea.split()) <= 5:
+            current["descripcion"] = (current["descripcion"] + " " + linea).strip()
+    return items
+
+
+def extraer_totales_intervidrio(texto):
+    m = TOTALS_ROW_RE_INTERVIDRIO.search(texto)
+    if not m:
+        return None, None, None, None
+    subtotal = limpiar_numero(m.group(1))
+    iva      = limpiar_numero(m.group(4))
+    pers     = limpiar_numero(m.group(5))
+    total    = limpiar_numero(m.group(6))
+    return subtotal, iva, pers, total
+
+
+def extraer_cliente_intervidrio(texto):
+    # El cliente aparece en su propia línea justo antes de "Dirección: ... BAHIA BLANCA"
+    # (puede traer el número de comprobante pegado al final, ej "Daniel Roque S.R.L. 000186").
+    m = re.search(
+        r'(?i)\n([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\.\s]+S\.?R\.?L\.?)\s*[\d\s]*\n\s*Direcci[oóé]n:',
+        texto
+    )
+    return m.group(1).strip() if m else None
+
+
+def parsear_intervidrio(texto):
+    subtotal_val, iva_val, pers_val, total = extraer_totales_intervidrio(texto)
+    m_iva_pct = re.search(PATRONES_INTERVIDRIO['iva_pct'], texto)
+    iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
+    if not total and subtotal_val:
+        total = round((subtotal_val or 0) + (iva_val or 0) + (pers_val or 0), 2)
+    numero = extraer_campo(texto, PATRONES_INTERVIDRIO['numero'])
+    if numero:
+        numero = re.sub(r'\s+', '', numero)
+    factura = {
+        'proveedor':      'intervidrio',
+        'numero':         numero,
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_INTERVIDRIO['fecha'])),
+        'vencimiento':    normalizar_fecha(extraer_campo(texto, PATRONES_INTERVIDRIO['vencimiento'])),
+        'tipo_factura':   extraer_campo(texto, PATRONES_INTERVIDRIO['tipo_factura']),
+        'cae':            extraer_campo(texto, PATRONES_INTERVIDRIO['cae']),
+        'condicion_pago': (extraer_campo(texto, PATRONES_INTERVIDRIO['condicion_pago']) or '').strip(),
+        'cliente_nombre': extraer_cliente_intervidrio(texto),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_INTERVIDRIO['cliente_cuit']),
+        'subtotal':       subtotal_val or None,
+        'iva_pct':        iva_pct,
+        'iva':            iva_val or None,
+        'pers_IIBB':      pers_val or None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_intervidrio(texto)
+    return factura, items
+
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -705,6 +838,8 @@ def ocr():
         factura, items = parsear_bonzini(texto)
     elif proveedor == 'inomax':
         factura, items = parsear_inomax(texto)
+    elif proveedor == 'intervidrio':
+        factura, items = parsear_intervidrio(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -782,6 +917,8 @@ def ocr_pdf():
         factura, items = parsear_bonzini(texto)
     elif proveedor == 'inomax':
         factura, items = parsear_inomax(texto)
+    elif proveedor == 'intervidrio':
+        factura, items = parsear_intervidrio(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
