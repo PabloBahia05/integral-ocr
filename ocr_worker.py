@@ -668,16 +668,33 @@ def preparar_imagen(file_obj):
     img = ImageOps.autocontrast(img, cutoff=2)
     return img
 
+def ocr_texto_multipagina(archivos):
+    """
+    Recibe una lista de FileStorage (una por hoja/página de la misma factura),
+    hace OCR a cada una en orden y devuelve el texto combinado con un
+    separador de página, para que el detector de proveedor y los parsers
+    de items/totales operen sobre el documento completo.
+    """
+    partes = []
+    for archivo in archivos:
+        img = preparar_imagen(archivo)
+        texto_pagina = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
+        partes.append(texto_pagina)
+    return '\n\n----PAGINA----\n\n'.join(partes)
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.post('/ocr')
 @app.post('/ocr-preview')
 def ocr():
-    if 'imagen' not in request.files:
+    # Soporta 1 o varias imágenes bajo la misma clave 'imagen' (una factura
+    # que viene en varias hojas: el frontend debe hacer
+    # formData.append('imagen', archivo) por cada hoja, en orden).
+    archivos = request.files.getlist('imagen')
+    if not archivos:
         return jsonify({'error': 'No se recibió imagen'}), 400
 
-    img   = preparar_imagen(request.files['imagen'])
-    texto = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
-    app.logger.warning("OCR TEXTO:\n%s", texto)
+    texto = ocr_texto_multipagina(archivos)
+    app.logger.warning("OCR TEXTO (%d hoja/s):\n%s", len(archivos), texto)
 
     proveedor = detectar_proveedor(texto)
     app.logger.warning("[OCR] proveedor detectado: %s", proveedor)
