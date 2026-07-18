@@ -41,6 +41,7 @@ PROVEEDORES = {
     "bonzini":   re.compile(r'(?i)bonzini|HERRAJES BONZINI|\b9997-\d{8}\b'),
     "inomax":    re.compile(r'(?is)inomax|herrajesinomax|STAAL\s+S\.A\.S|(?=.*Subtotal Neto:)(?=.*CAE\s*Nro:)'),
     "intervidrio": re.compile(r'(?i)intervidrio|LA CASA DE LOS CRISTALES'),
+    "metalurgica_gg": re.compile(r'(?i)metal[uú]rgica\s*g\.?\s*g\.?|30-71051717-3'),
 }
 
 def detectar_proveedor(texto):
@@ -614,6 +615,128 @@ def parsear_intervidrio(texto):
     return factura, items
 
 
+# ── Patrones específicos Metalúrgica G.G. ────────────────────────────────────
+# OJO: esta factura usa formato numérico "US" (coma = miles, punto = decimales),
+# al revés que el resto de los proveedores (que usan formato argentino).
+# Ej: "138,705.60"  "277,411.20"
+NUM_US_METALURGICA = r'\d{1,3}(?:,\d{3})*\.\d{2}'
+
+PATRONES_METALURGICA = {
+    "numero":         r"(?i)([A-Z]\d{5}\s*-\s*\d{8})",
+    "fecha":          r"(?i)fecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "cae":            r"(?i)C\.?A\.?E\.?\s*:?\s*(\d{10,})",
+    "cae_vto":        r"(?i)VTO\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"(?i)Cond\.?\s*de\s*Venta:\s*(.+?)(?:\n|$)",
+    "cliente_nombre": r"(?i)Cliente:\s*\d+\s*-\s*(.+?)(?:\n|$)",
+    "pedido":         r"(?i)Pedido:\s*(\S+)",
+}
+
+CUIT_RE_METALURGICA = re.compile(r'(\d{2}-\d{8}-\d{1})')
+
+# Item: CODIGO  CANTIDAD(us)  DESCRIPCION  P.UNITARIO(us)  [BONIF%]  IMPORTE(us)
+# Ej: "IST-OCULTO-1  2.00 SISTEMA OCULTO 150 mts C.C. 80  138,705.60  277,411.20"
+ITEM_RE_METALURGICA = re.compile(
+    r'^(\S+)\s+'                              # codigo
+    r'(\d+\.\d{2})\s+'                        # cantidad (formato us: 2.00)
+    r'(.+?)\s+'                                # descripcion
+    r'(' + NUM_US_METALURGICA + r')\s+'        # precio unitario
+    r'(?:(\d+(?:\.\d+)?)\s*%\s+)?'             # bonif % (opcional)
+    r'(' + NUM_US_METALURGICA + r')\s*$',      # importe
+    re.IGNORECASE
+)
+
+STOP_RE_METALURGICA = re.compile(
+    r'(?i)subtotal|bonificaci[oó]n|^iva|total\s+pesos|c\.a\.e|son:|pesos|'
+    r'c[oó]digo\s+cantidad|responsable\s+inscripto|condici[oó]n\s+de\s+venta'
+)
+
+
+def limpiar_numero_us(s):
+    """Limpia números en formato US (coma=miles, punto=decimal), usado sólo por Metalúrgica GG."""
+    if not s:
+        return None
+    s = s.strip().replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def extraer_items_metalurgica(texto):
+    items = []
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea:
+            continue
+        if STOP_RE_METALURGICA.search(linea):
+            continue
+        m = ITEM_RE_METALURGICA.match(linea)
+        if not m:
+            continue
+        items.append({
+            "codigo":       m.group(1).strip(),
+            "descripcion":  m.group(3).strip(),
+            "cantidad":     limpiar_numero_us(m.group(2)),
+            "precio_unit":  limpiar_numero_us(m.group(4)),
+            "bonif_pct":    float(m.group(5)) if m.group(5) else 0.0,
+            "subtotalprod": limpiar_numero_us(m.group(6)),
+        })
+    return items
+
+
+def extraer_totales_metalurgica(texto):
+    # Puede haber dos líneas "Subtotal" (antes y después de Bonificación);
+    # nos quedamos con la última, que es el subtotal neto de bonificación.
+    subtotales = re.findall(r'(?i)subtotal\s*:?\s*(' + NUM_US_METALURGICA + r')', texto)
+    subtotal_val = limpiar_numero_us(subtotales[-1]) if subtotales else None
+
+    m_iva = re.search(r'(?i)IVA\s+(\d{1,2}(?:[.,]\d+)?)\s*%\s*:?\s*(' + NUM_US_METALURGICA + r')', texto)
+    iva_pct = float(m_iva.group(1).replace(',', '.')) if m_iva else 21.0
+    iva_val = limpiar_numero_us(m_iva.group(2)) if m_iva else None
+
+    m_total = re.search(r'(?i)Total\s+Pesos\s*:?\s*(' + NUM_US_METALURGICA + r')', texto)
+    total = limpiar_numero_us(m_total.group(1)) if m_total else None
+
+    return subtotal_val, iva_pct, iva_val, total
+
+
+def extraer_cuits_metalurgica(texto):
+    # La primera coincidencia suele ser el CUIT propio de Metalúrgica GG,
+    # la segunda (o única, si sólo hay una) es el CUIT del cliente.
+    cuits = CUIT_RE_METALURGICA.findall(texto)
+    if not cuits:
+        return None
+    return cuits[-1]
+
+
+def parsear_metalurgica_gg(texto):
+    subtotal_val, iva_pct, iva_val, total = extraer_totales_metalurgica(texto)
+    numero = extraer_campo(texto, PATRONES_METALURGICA['numero'])
+    if numero:
+        numero = re.sub(r'\s+', '', numero)
+    factura = {
+        'proveedor':      'metalurgica_gg',
+        'numero':         numero,
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_METALURGICA['fecha'])),
+        'tipo_factura':   numero[0].upper() if numero else None,
+        'cae':            extraer_campo(texto, PATRONES_METALURGICA['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_METALURGICA['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_METALURGICA['condicion_pago']) or '').strip(),
+        'cliente_nombre': (extraer_campo(texto, PATRONES_METALURGICA['cliente_nombre']) or '').strip() or None,
+        'cliente_cuit':   extraer_cuits_metalurgica(texto),
+        'pedido':         extraer_campo(texto, PATRONES_METALURGICA['pedido']),
+        'subtotal':       subtotal_val,
+        'iva_pct':        iva_pct,
+        'iva':            iva_val,
+        'pers_IIBB':      None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_metalurgica(texto)
+    return factura, items
+
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -840,6 +963,8 @@ def ocr():
         factura, items = parsear_inomax(texto)
     elif proveedor == 'intervidrio':
         factura, items = parsear_intervidrio(texto)
+    elif proveedor == 'metalurgica_gg':
+        factura, items = parsear_metalurgica_gg(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -919,6 +1044,8 @@ def ocr_pdf():
         factura, items = parsear_inomax(texto)
     elif proveedor == 'intervidrio':
         factura, items = parsear_intervidrio(texto)
+    elif proveedor == 'metalurgica_gg':
+        factura, items = parsear_metalurgica_gg(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
