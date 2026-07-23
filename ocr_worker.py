@@ -109,11 +109,21 @@ LOTE_RE_PLACASUR = re.compile(r'(?i)^Lote\s+Nro\s+Lote:', re.MULTILINE)
 
 def extraer_items_placasur(texto):
     items = []
+    # Cuando la descripción de un ítem no entra en una línea, PlacaSur la
+    # completa en el renglón siguiente, suelto, justo antes de "Lote Nro Lote:".
+    # Ej.: "EH35SCP- PLACA DE MONT.EH BISAGRA CLIP 100.00 UN (1) 191.39 124.45 34,98% 12,445.08"
+    #      "ALT.2MM"
+    #      "Lote Nro Lote: ..."
+    # Esta bandera solo queda "abierta" entre el match del ítem y la línea de
+    # Lote (o el próximo ítem), así no se pega texto de otras secciones del
+    # documento (totales, leyendas, etc.) a la descripción del último ítem.
+    esperando_continuacion = False
     for linea_raw in texto.split('\n'):
         linea = linea_raw.strip()
         if not linea:
             continue
         if LOTE_RE_PLACASUR.match(linea):
+            esperando_continuacion = False
             continue
         m = ITEM_RE_PLACASUR.match(linea)
         if m:
@@ -124,6 +134,10 @@ def extraer_items_placasur(texto):
                 "precio_unit":  limpiar_numero(m.group(5)),  # precio con descuento aplicado
                 "subtotalprod": limpiar_numero(m.group(6)),
             })
+            esperando_continuacion = True
+        elif esperando_continuacion and items:
+            items[-1]["descripcion"] = (items[-1]["descripcion"] + ' ' + linea).strip()
+            esperando_continuacion = False
     return items
 
 def extraer_totales_placasur(texto):
