@@ -56,26 +56,41 @@ PATRONES_PLACASUR = {
     "numero":         r"N[°º]:\s*([\d]{5}-[\d]{8})",
     "fecha":          r"Fecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
     "vencimiento":    r"Vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    # tipo_factura: en facturas viejas aparece "Factura A"; en el layout nuevo pdfplumber
+    # aplana las dos columnas del encabezado y la letra queda ANTES, sola en su línea
+    # ("A\nFactura\n01\n..."). Se intentan ambos patrones.
+    "tipo_factura_nuevo": r"(?m)^([ABCME])\s*\n(?=Factura)",
     "tipo_factura":   r"Factura\s+([A-Z])\b",
     "cae":            r"CAE:\s*(\d+)",
     "cae_vto":        r"VTO:\s*(\d{1,2}/\d{1,2}/\d{4})",
     "condicion_pago": r"Condicion de Venta:\s*(.+?)(?:\n|Cnel|$)",
-    "cliente_nombre": r"Señor\(es\):\s*(.+?)(?:\n|$)",
+    # cliente_nombre: cortar antes de "Vencimiento:" que en el layout nuevo queda
+    # pegado en la misma línea por el aplanado de columnas de pdfplumber.
+    "cliente_nombre": r"Señor\(es\):\s*(.+?)(?:\s+Vencimiento:|\n|$)",
+    # cliente_cuit: hay dos "CUIT:" en el documento (emisor y cliente); se toma el que
+    # sigue a "Cliente Nro:" para no quedarse con el CUIT de PlacaSur. Si el layout no
+    # trae "Cliente Nro:" pegado, cae al patrón genérico (comportamiento anterior).
+    "cliente_cuit_cerca_cliente": r"Cliente Nro:[^\n]*\n\s*CUIT:\s*([\d-]+)",
     "cliente_cuit":   r"CUIT:\s*([\d-]+)",
-    # Totales: "Gravado ARS 1.561.659,29"
-    "gravado":        r"(?i)Gravado\s+ARS\s+([\d.]+,\d{2})",
-    "subtotal":       r"(?i)Subtotal\s+ARS\s+([\d.]+,\d{2})",
-    "iva":            r"(?i)IVA:\s+ARS\s+([\d.]+,\d{2})",
+    # Totales: "Gravado ARS 1.561.659,29" (formato AR) o "Gravado ARS 656,236.60" (formato US,
+    # visto en facturas PlacaSur más nuevas). Se captura el número completo sin fijar qué
+    # símbolo es el decimal; limpiar_numero() decide el formato al parsear.
+    "gravado":        r"(?i)Gravado\s+ARS\s+([\d.,]+)",
+    "subtotal":       r"(?i)Subtotal\s+ARS\s+([\d.,]+)",
+    "iva":            r"(?i)IVA:\s+ARS\s+([\d.,]+)",
     "iva_pct":        r"(?i)IVA\s+(21|10[,.]?5|27)\s*%",
-    "pers_IIBB":      r"(?i)Total Percep\.\s*:\s*ARS\s+([\d.]+,\d{2})",
-    "total":          r"(?i)Total:\s*ARS\s+([\d.]+,\d{2})",
+    "pers_IIBB":      r"(?i)Total Percep\.\s*:\s*ARS\s+([\d.,]+)",
+    "total":          r"(?i)Total:\s*ARS\s+([\d.,]+)",
 }
 
 # Items PlacaSur: CODIGO  DESCRIPCION  CANTIDAD  UN  (UNxART)  PRECIO_ARS  PRECIO_DESC_ARS  DESC%  TOTAL_ARS
-# Ej: "EHB35C9 BISAGRAS EUROHARD 35 C 9 250,00 UN (1) 607,09 394,76 34,98% 98.690,82"
-_NUM_ARG_PS = r'[\d]{1,3}(?:[.][\d]{3})*[,][\d]{2}'
-_CANT_PS    = r'[\d]+[,][\d]{2}'
-_DESC_PS    = r'[\d]+[,][\d]{2}%'
+# Ej. formato AR: "EHB35C9 BISAGRAS EUROHARD 35 C 9 250,00 UN (1) 607,09 394,76 34,98% 98.690,82"
+# Ej. formato US (facturas más nuevas): "EHB35C0 ... 250.00 UN (1) 607.09 394.76 34,98% 98,690.82"
+# Acepta tanto "." como "," como separador, en cualquier posición (miles o decimal);
+# limpiar_numero() resuelve el formato real al convertir cada valor capturado.
+_NUM_ARG_PS = r'[\d]{1,3}(?:[.,][\d]{3})*[.,][\d]{2}'
+_CANT_PS    = r'[\d]+[.,][\d]{2}'
+_DESC_PS    = r'[\d]+[.,][\d]{2}%'
 
 ITEM_RE_PLACASUR = re.compile(
     r'^(\S+)\s+'           # codigo
@@ -129,12 +144,14 @@ def parsear_placasur(texto):
         'numero':         extraer_campo(texto, PATRONES_PLACASUR['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['fecha'])),
         'vencimiento':    normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['vencimiento'])),
-        'tipo_factura':   extraer_campo(texto, PATRONES_PLACASUR['tipo_factura']),
+        'tipo_factura':   (extraer_campo(texto, PATRONES_PLACASUR['tipo_factura_nuevo'])
+                            or extraer_campo(texto, PATRONES_PLACASUR['tipo_factura'])),
         'cae':            extraer_campo(texto, PATRONES_PLACASUR['cae']),
         'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_PLACASUR['cae_vto'])),
         'condicion_pago': (extraer_campo(texto, PATRONES_PLACASUR['condicion_pago']) or '').strip(),
         'cliente_nombre': extraer_campo(texto, PATRONES_PLACASUR['cliente_nombre']),
-        'cliente_cuit':   extraer_campo(texto, PATRONES_PLACASUR['cliente_cuit']),
+        'cliente_cuit':   (extraer_campo(texto, PATRONES_PLACASUR['cliente_cuit_cerca_cliente'])
+                            or extraer_campo(texto, PATRONES_PLACASUR['cliente_cuit'])),
         'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
         'iva':            iva_val or None,
