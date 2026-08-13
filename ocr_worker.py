@@ -42,6 +42,7 @@ PROVEEDORES = {
     "inomax":    re.compile(r'(?is)inomax|herrajesinomax|STAAL\s+S\.A\.S|(?=.*Subtotal Neto:)(?=.*CAE\s*Nro:)'),
     "intervidrio": re.compile(r'(?i)intervidrio|LA CASA DE LOS CRISTALES'),
     "metalurgica_gg": re.compile(r'(?i)metal[uú]rgica\s*g\.?\s*g\.?|30-71051717-3'),
+    "burgert":   re.compile(r'(?i)burgert|pinturasburgert|30-50203626-9'),
 }
 
 def detectar_proveedor(texto):
@@ -768,6 +769,108 @@ def parsear_metalurgica_gg(texto):
     return factura, items
 
 
+# ── Patrones específicos BURGERT S.A. (BSA - pinturas) ───────────────────────
+# OJO: igual que Metalúrgica G.G., esta factura usa formato numérico "US"
+# (coma = miles, punto = decimales). El precio unitario a veces viene sin
+# separador de miles ("497192.00") y el importe con él ("497,192.00"); el
+# patrón admite ambos casos.
+NUM_US_BURGERT = r'\d+(?:,\d{3})*\.\d{2}'
+
+PATRONES_BURGERT = {
+    "numero":         r"(?i)N[°ºo]?\s*[:.]?\s*(A?\d{4,5}\s*-\s*\d{5,8})",
+    "fecha":          r"(?i)FECHA\s+(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r'(?i)FACTURA\s+"?([ABCME])"?\s+ELECTR[OÓ]NICA',
+    "cae":            r"(?i)C\.?A\.?E\.?\s*N[°º]?\s*:?\s*(\d{10,})",
+    "cae_vto":        r"(?i)vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"(?i)Cond\.?\s*Venta:\s*(.+?)(?:\n|REMITO|$)",
+    "remito":         r"(?i)REMITO:\s*(\S+)",
+    "cliente_cuit":   r"(?i)Responsable inscripto\s*\n?\s*([\d-]{11,13})",
+}
+
+# Item: CANTIDAD  CODIGO  DESCRIPCION  PRECIO(us)  IMPORTE(us)
+# Ej: "1.00 CPU5552KL LACA BLANCA SM (50g) 5552 20L 497192.00 497,192.00"
+ITEM_RE_BURGERT = re.compile(
+    r'^(\d+\.\d{2})\s+'                     # cantidad
+    r'(\S+)\s+'                             # codigo
+    r'(.+?)\s+'                             # descripcion
+    r'(' + NUM_US_BURGERT + r')\s+'         # precio unitario
+    r'(' + NUM_US_BURGERT + r')\s*$',       # importe
+    re.IGNORECASE
+)
+
+STOP_RE_BURGERT = re.compile(
+    r'(?i)^(cantidad\s+codigo|subtotal|descuento|i\.?v\.?a\.?|perc\.?\s*i{1,2}b{1,2}|'
+    r'total\b|c\.a\.e|remito|cond\.?\s*venta|responsable\s+inscripto)'
+)
+
+
+def extraer_items_burgert(texto):
+    items = []
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea or STOP_RE_BURGERT.match(linea):
+            continue
+        m = ITEM_RE_BURGERT.match(linea)
+        if not m:
+            continue
+        items.append({
+            "codigo":       m.group(2).strip(),
+            "descripcion":  m.group(3).strip(),
+            "cantidad":     limpiar_numero_us(m.group(1)),
+            "precio_unit":  limpiar_numero_us(m.group(4)),
+            "subtotalprod": limpiar_numero_us(m.group(5)),
+        })
+    return items
+
+
+def extraer_totales_burgert(texto):
+    # Hay dos líneas "Subtotal" (bruto y neto de descuento); nos quedamos
+    # con la última, que es el subtotal neto que se usa para el IVA.
+    subtotales = re.findall(r'(?i)subtotal\s*:?\s*(' + NUM_US_BURGERT + r')', texto)
+    subtotal_val = limpiar_numero_us(subtotales[-1]) if subtotales else None
+
+    descuento_val = limpiar_numero_us(
+        extraer_campo(texto, r"(?i)Descuento\s*:?\s*(" + NUM_US_BURGERT + r")"))
+    iva_val = limpiar_numero_us(
+        extraer_campo(texto, r"(?i)I\.?V\.?A\.?\s*:?\s*(" + NUM_US_BURGERT + r")"))
+    pers_val = limpiar_numero_us(
+        extraer_campo(texto, r"(?i)Perc\.?\s*I{1,2}B{1,2}\s*:?\s*(" + NUM_US_BURGERT + r")"))
+    total = limpiar_numero_us(
+        extraer_campo(texto, r"(?i)\bTOTAL\s+(" + NUM_US_BURGERT + r")"))
+
+    iva_pct = round(iva_val / subtotal_val * 100, 2) if (iva_val and subtotal_val) else 21.0
+
+    return subtotal_val, descuento_val, iva_pct, iva_val, pers_val, total
+
+
+def parsear_burgert(texto):
+    subtotal_val, descuento_val, iva_pct, iva_val, pers_val, total = extraer_totales_burgert(texto)
+    numero = extraer_campo(texto, PATRONES_BURGERT['numero'])
+    if numero:
+        numero = re.sub(r'\s+', '', numero)
+    factura = {
+        'proveedor':      'burgert',
+        'numero':         numero,
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_BURGERT['fecha'])),
+        'tipo_factura':   extraer_campo(texto, PATRONES_BURGERT['tipo_factura']),
+        'cae':            extraer_campo(texto, PATRONES_BURGERT['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_BURGERT['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_BURGERT['condicion_pago']) or '').strip(),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_BURGERT['cliente_cuit']),
+        'remito':         extraer_campo(texto, PATRONES_BURGERT['remito']),
+        'subtotal':       subtotal_val,
+        'descuento':      descuento_val,
+        'iva_pct':        iva_pct,
+        'iva':            iva_val,
+        'pers_IIBB':      pers_val,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    items = extraer_items_burgert(texto)
+    return factura, items
+
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -996,6 +1099,8 @@ def ocr():
         factura, items = parsear_intervidrio(texto)
     elif proveedor == 'metalurgica_gg':
         factura, items = parsear_metalurgica_gg(texto)
+    elif proveedor == 'burgert':
+        factura, items = parsear_burgert(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -1077,6 +1182,8 @@ def ocr_pdf():
         factura, items = parsear_intervidrio(texto)
     elif proveedor == 'metalurgica_gg':
         factura, items = parsear_metalurgica_gg(texto)
+    elif proveedor == 'burgert':
+        factura, items = parsear_burgert(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
