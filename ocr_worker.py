@@ -182,7 +182,7 @@ def parsear_placasur(texto):
 PATRONES_BONZINI = {
     "numero":         r"(\d{4}-\d{8})",
     "fecha_factura":  r"Fecha de Emision[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
-    "fecha_presup":   r"FECHA[:\s—\-]+(\d{1,2}/\d{1,2}/\d{4})",
+    "fecha_presup":   r"FECHA[^:\n\d]{0,25}[:\s—\-]+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
     "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
     "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
     "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
@@ -361,7 +361,8 @@ def extraer_items_bonzini(texto, es_presup=False):
 def parsear_bonzini(texto):
     es_presup = _es_presupuesto_bonzini(texto)
     fecha_raw = extraer_campo(texto, PATRONES_BONZINI['fecha_factura']) \
-                or extraer_campo(texto, PATRONES_BONZINI['fecha_presup'])
+                or extraer_campo(texto, PATRONES_BONZINI['fecha_presup']) \
+                or extraer_campo(texto, PATRONES['fecha'])
     cliente = extraer_campo(texto, PATRONES_BONZINI['cliente_factura']) \
               or extraer_campo(texto, PATRONES_BONZINI['cliente_presup'])
     if es_presup:
