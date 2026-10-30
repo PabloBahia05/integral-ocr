@@ -609,14 +609,31 @@ def extraer_totales_intervidrio(texto):
     return subtotal, iva, pers, total
 
 
+CUIT_INTERVIDRIO = '30-70872721-7'
+
+
 def extraer_cliente_intervidrio(texto):
     # El cliente aparece en su propia línea justo antes de "Dirección: ... BAHIA BLANCA"
     # (puede traer el número de comprobante pegado al final, ej "Daniel Roque S.R.L. 000186").
-    m = re.search(
+    # OJO: el encabezado del proveedor ("INTERVIDRIO S.R.L." + "Dirección: Calle 102...") tiene la misma
+    # forma y viene primero, así que se saltea.
+    for m in re.finditer(
         r'(?i)\n([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\.\s]+S\.?R\.?L\.?)\s*[\d\s]*\n\s*Direcci[oóé]n:',
         texto
-    )
-    return m.group(1).strip() if m else None
+    ):
+        nombre = m.group(1).strip()
+        if 'intervidrio' in nombre.lower():
+            continue
+        return nombre
+    return None
+
+
+def extraer_cuit_cliente_intervidrio(texto):
+    # Hay dos "C.U.I.T.:" (proveedor y cliente): se toma el que no es el de Intervidrio.
+    for cuit in re.findall(PATRONES_INTERVIDRIO['cliente_cuit'], texto):
+        if cuit.strip() != CUIT_INTERVIDRIO:
+            return cuit.strip()
+    return None
 
 
 def parsear_intervidrio(texto):
@@ -637,7 +654,7 @@ def parsear_intervidrio(texto):
         'cae':            extraer_campo(texto, PATRONES_INTERVIDRIO['cae']),
         'condicion_pago': (extraer_campo(texto, PATRONES_INTERVIDRIO['condicion_pago']) or '').strip(),
         'cliente_nombre': extraer_cliente_intervidrio(texto),
-        'cliente_cuit':   extraer_campo(texto, PATRONES_INTERVIDRIO['cliente_cuit']),
+        'cliente_cuit':   extraer_cuit_cliente_intervidrio(texto),
         'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
         'iva':            iva_val or None,
@@ -1216,6 +1233,40 @@ def extraer_totales(texto):
     return subtotal_val, iva_val, pers_val, total_leido, total
 
 
+def _es_char_blanco(o):
+    """Carácter de texto BLANCO (invisible sobre fondo blanco). RGB (1,1,1), gris 1 o CMYK (0,0,0,0)."""
+    if o.get('object_type') != 'char':
+        return False
+    c = o.get('non_stroking_color')
+    if c is None:
+        return False
+    if not isinstance(c, (list, tuple)):
+        c = (c,)
+    try:
+        vals = [float(x) for x in c]
+    except (TypeError, ValueError):
+        return False
+    if len(vals) == 4:
+        return all(v < 0.01 for v in vals)
+    return len(vals) > 0 and all(v > 0.99 for v in vals)
+
+
+def extraer_texto_pdf_visible(pdf):
+    """
+    Texto de TODAS las hojas del PDF, ignorando el texto blanco.
+    Los PDF de Intervidrio traen, debajo de lo que se ve, una segunda capa de texto blanco superpuesta
+    (códigos, partidas, etc.). pdfplumber mezcla las dos capas letra por letra y la línea queda ilegible
+    ("1LL0aA,,mC55-in54E2aS5,d0Mo0..."), con lo que no se encuentra ningún ítem y el cliente sale mal.
+    """
+    partes = []
+    for pagina in pdf.pages:
+        visible = pagina.filter(lambda o: not _es_char_blanco(o))
+        t = visible.extract_text()
+        if t:
+            partes.append(t)
+    return ('\n'.join(partes) + '\n') if partes else ''
+
+
 def preparar_imagen(file_obj):
     img = Image.open(file_obj).convert('RGB')
     w, h = img.size
@@ -1321,6 +1372,11 @@ def ocr_pdf():
                 t = pagina.extract_text()
                 if t:
                     texto += t + '\n'
+            # Intervidrio (factura de varias hojas): se vuelve a leer ignorando la capa de texto blanco
+            if detectar_proveedor(texto) == 'intervidrio':
+                texto_visible = extraer_texto_pdf_visible(pdf)
+                if texto_visible.strip():
+                    texto = texto_visible
 
         # Si pdfplumber no extrajo nada (PDF escaneado), hacer OCR página por página
         if not texto.strip():
