@@ -43,6 +43,8 @@ PROVEEDORES = {
     "intervidrio": re.compile(r'(?i)intervidrio|LA CASA DE LOS CRISTALES'),
     "metalurgica_gg": re.compile(r'(?i)metal[uú]rgica\s*g\.?\s*g\.?|30-71051717-3'),
     "burgert":   re.compile(r'(?i)burgert|pinturasburgert|30-50203626-9'),
+    # ALUMAR: el logo sale mal en el OCR a veces, por eso también se detecta por el CUIT del emisor y el domicilio
+    "alumar":    re.compile(r'(?i)\balumar\b|20-?22368365-?8|Alte\.?\s*Solier\s*3722'),
 }
 
 def detectar_proveedor(texto):
@@ -872,6 +874,171 @@ def parsear_burgert(texto):
     return factura, items
 
 
+# ── Patrones específicos ALUMAR ───────────────────────────────────────────────
+# ALUMAR (Ruggero Francisco Diego, CUIT 20-22368365-8). Columnas:
+#   Cantidad | Código | Descripción | Precio Unitario | Descuento | Importe
+# Ítem:  "10 UN L1463N PERFIL A421 NOTTE - TIRA 3 MTS 28590.000 285,900.00"
+# El precio unitario viene con punto decimal y 3 decimales (sin miles) y los importes en formato US
+# (coma de miles, punto decimal: 285,900.00).
+# El número de factura se arma con "Punto de Venta" + "Comp. Nro." (00010 + 00044613 -> 00010-00044613).
+# La letra del recuadro y el nombre del emisor salen mal en el OCR; el tipo de factura se saca del código
+# AFIP que está debajo de la letra ("COD.01" = A, 06 = B, 11 = C, 51 = M).
+CUIT_ALUMAR = '20-22368365-8'
+TIPO_POR_COD_AFIP = {'01': 'A', '06': 'B', '11': 'C', '51': 'M'}
+
+PATRONES_ALUMAR = {
+    "pto_venta":      r"(?i)Punto\s+de\s+Venta\s*[:.]?\s*(\d{4,5})",
+    "comp_nro":       r"(?i)Comp\.?\s*Nro\.?\s*[:.]?\s*(\d{6,8})",
+    "fecha":          r"(?i)Fecha\s+de\s+Emisi\S{1,3}n\s*[:.]?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "cod_afip":       r"(?i)\bCOD\.?\s*(\d{2})\b",
+    "cae":            r"(?i)CAE\s*[:.]?\s*(\d{10,})",
+    "cae_vto":        r"(?i)CAE\s*[:.]?\s*\d{10,}\s+(\d{1,2}/\d{1,2}/\d{4})",
+    # "Condicion de venta: © CONTADO" (el OCR mete un símbolo antes de la palabra)
+    "condicion_pago": r"(?im)Condici\S{1,2}n\s+de\s+venta\s*[:.]?\s*[^A-Za-z0-9\n]*([A-Za-z0-9][A-Za-z0-9 ]*?)\s*[^A-Za-z0-9\n]*$",
+    "remito":         r"(?i)Nro\.?\s*Remito\s*[:.]?\s*(\d+)",
+    # Razón Social: 550-DANIEL ROQUE S.R.L. CUIT: 30649863624   (el 550 es el nº de cliente en ALUMAR)
+    "cliente":        r"(?im)Raz\S{1,2}n\s+Social\s*[:.]?\s*(?:\d+\s*-\s*)?(.+?)\s+CUIT\s*[:.]?\s*(\d{2}-?\d{8}-?\d)",
+    "cuit":           r"(?i)CUIT\s*[:.]?\s*(\d{2}-?\d{8}-?\d)",
+    "subtotal":       r"(?i)Neto\s+Gravado\s*[:.]?\s*\$?\s*([\d.,]*\d)",
+    "iva":            r"(?i)\bIva\s+(10[.,]5|21|27)(?:[.,]0+)?\s*%?\s*:?\s*\$?\s*([\d.,]*\d)",
+    "pers_IIBB":      r"(?i)Perc\w*\.?\s*(?:de\s+)?(?:IIBB|I\.?B\.?|Ingresos\s+Brutos)\S*\s*:?\s*\$?\s*([\d.,]*\d)",
+    "total":          r"(?i)Importe\s+Total\s*[:.]?\s*\$?\s*([\d.,]*\d)",
+}
+
+# importe: 285,900.00 (US, como sale en ALUMAR) o 285.900,00 (AR, por si algún PDF lo trae así)
+_NUM_US_ALUMAR = r'(?:\d{1,3}(?:,\d{3})*\.\d{2}|\d{1,3}(?:\.\d{3})*,\d{2})'
+
+ITEM_RE_ALUMAR = re.compile(
+    r'^(\d+(?:[.,]\d+)?)\s*'                                  # cantidad
+    r'(UN|UNI|MT|MTS|ML|M2|KG|PZA|PAR|JGO|SET|LT|U)?\s+'      # unidad
+    r'((?=\S*\d)\S+)\s+'                                      # código (con al menos un dígito)
+    r'(.+?)\s+'                                               # descripción
+    r'((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2,3}|(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2,3})\s+'  # precio unitario (28590.000)
+    r'(?:(\d+(?:[.,]\d+)?)\s*%?\s+)?'                         # descuento (opcional)
+    r'(' + _NUM_US_ALUMAR + r')\s*$',                         # importe (285,900.00)
+    re.IGNORECASE
+)
+
+
+def _num_alumar(s):
+    """ALUMAR: 285,900.00 / 28590.000 (US). Por si algún PDF lo trae en formato AR (285.900,00) también lo resuelve."""
+    if not s:
+        return None
+    s = s.strip()
+    if re.search(r',\d{2,3}$', s):
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        s = s.replace(',', '')
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _formatear_cuit(s):
+    d = re.sub(r'\D', '', s or '')
+    return f"{d[:2]}-{d[2:10]}-{d[10]}" if len(d) == 11 else (s or None)
+
+
+def extraer_items_alumar(texto):
+    lineas = texto.split('\n')
+    ini = 0
+    for i, l in enumerate(lineas):
+        if re.search(r'(?i)cantidad', l) and re.search(r'(?i)descripci', l):
+            ini = i + 1
+            break
+    items = []
+    for linea_raw in lineas[ini:]:
+        linea = limpiar_linea(linea_raw.strip())
+        if not linea:
+            continue
+        if re.search(r'(?i)neto\s+gravado|importe\s+total|^iva\s', linea):
+            break  # terminó la tabla de ítems
+        m = ITEM_RE_ALUMAR.match(linea)
+        if not m:
+            continue
+        cantidad = float(m.group(1).replace(',', '.'))
+        precio_lista = _num_alumar(m.group(5))
+        desc = float(m.group(6).replace(',', '.')) if m.group(6) else 0.0
+        importe = _num_alumar(m.group(7))
+        # con descuento, precio_unit es el precio ya descontado (importe / cantidad), igual que en PlacaSur
+        if desc > 0 and cantidad and importe:
+            precio_unit = round(importe / cantidad, 2)
+        else:
+            precio_unit = precio_lista
+        items.append({
+            "codigo":       m.group(3).strip(),
+            "descripcion":  m.group(4).strip(),
+            "cantidad":     cantidad,
+            "precio_unit":  precio_unit,
+            "subtotalprod": importe,
+        })
+    return items
+
+
+def parsear_alumar(texto):
+    pv  = extraer_campo(texto, PATRONES_ALUMAR['pto_venta'])
+    nro = extraer_campo(texto, PATRONES_ALUMAR['comp_nro'])
+    if pv and nro:
+        numero = f"{pv.zfill(5)}-{nro.zfill(8)}"
+    else:
+        m_n = re.search(r'\b(\d{5})-(\d{8})\b', texto)
+        numero = m_n.group(0) if m_n else None
+
+    # Cliente: la línea "Razón Social: <nº>-<NOMBRE> CUIT: <cuit>"; si por OCR se mezcla con la del emisor,
+    # se descarta la que trae el CUIT de ALUMAR.
+    cliente_nombre, cliente_cuit = None, None
+    for m_c in re.finditer(PATRONES_ALUMAR['cliente'], texto):
+        cuit = _formatear_cuit(m_c.group(2))
+        if cuit != CUIT_ALUMAR:
+            cliente_nombre, cliente_cuit = m_c.group(1).strip(), cuit
+            break
+    if not cliente_cuit:
+        for m_u in re.finditer(PATRONES_ALUMAR['cuit'], texto):
+            cuit = _formatear_cuit(m_u.group(1))
+            if cuit != CUIT_ALUMAR:
+                cliente_cuit = cuit
+                break
+
+    items = extraer_items_alumar(texto)
+
+    subtotal = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['subtotal']))
+    m_iva = re.search(PATRONES_ALUMAR['iva'], texto)
+    iva_pct = float(m_iva.group(1).replace(',', '.')) if m_iva else 21.0
+    iva  = _num_alumar(m_iva.group(2)) if m_iva else None
+    pers = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['pers_IIBB']))
+    total = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['total']))
+    if subtotal is None and items:
+        subtotal = round(sum(i['subtotalprod'] or 0 for i in items), 2)
+    if iva is None and subtotal is not None:
+        iva = round(subtotal * iva_pct / 100, 2)
+    if total is None and subtotal is not None:
+        total = round(subtotal + (iva or 0) + (pers or 0), 2)
+
+    cod = extraer_campo(texto, PATRONES_ALUMAR['cod_afip'])
+    factura = {
+        'proveedor':      'alumar',
+        'proveedor_cuit': CUIT_ALUMAR,
+        'numero':         numero,
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_ALUMAR['fecha'])),
+        'tipo_factura':   TIPO_POR_COD_AFIP.get(cod),
+        'cae':            extraer_campo(texto, PATRONES_ALUMAR['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_ALUMAR['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_ALUMAR['condicion_pago']) or '').strip(),
+        'cliente_nombre': cliente_nombre,
+        'cliente_cuit':   cliente_cuit,
+        'remito':         extraer_campo(texto, PATRONES_ALUMAR['remito']),
+        'subtotal':       subtotal,
+        'iva_pct':        iva_pct,
+        'iva':            iva,
+        'pers_IIBB':      pers or None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    return factura, items
+
+
 NUM_ARG = r'\d{1,3}(?:[.]\d{3})*[,]\d{2}'
 CANT_PAT = r'\d+[,.]\d{1,3}'
 
@@ -1102,6 +1269,8 @@ def ocr():
         factura, items = parsear_metalurgica_gg(texto)
     elif proveedor == 'burgert':
         factura, items = parsear_burgert(texto)
+    elif proveedor == 'alumar':
+        factura, items = parsear_alumar(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -1185,6 +1354,8 @@ def ocr_pdf():
         factura, items = parsear_metalurgica_gg(texto)
     elif proveedor == 'burgert':
         factura, items = parsear_burgert(texto)
+    elif proveedor == 'alumar':
+        factura, items = parsear_alumar(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
