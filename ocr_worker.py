@@ -539,6 +539,9 @@ PATRONES_INTERVIDRIO = {
     "cliente_nombre": None,  # aparece antes de "Dirección:", se toma con extraer_cliente_intervidrio
     "cliente_cuit":   r"(?i)C\.U\.I\.T\.:\s*([\d-]+)",
     "iva_pct":        r'(\d{1,2}[,.]\d{2})\s*%',
+    # Percepciones detalladas (hoja 2), ej: "Percep IVA RG 2408 32.087,29" / "Percep. IIBB Bs. As. 2.139,15"
+    "pers_IVA":       r'(?im)Percep\.?\s*IVA\b[^\n]*?\s(\d{1,3}(?:[.]\d{3})*[,]\d{2})[ \t]*$',
+    "pers_IIBB":      r'(?im)Percep\.?\s*IIBB\b[^\n]*?\s(\d{1,3}(?:[.]\d{3})*[,]\d{2})[ \t]*$',
 }
 
 ITEM_RE_INTERVIDRIO = re.compile(
@@ -638,6 +641,16 @@ def extraer_cuit_cliente_intervidrio(texto):
 
 def parsear_intervidrio(texto):
     subtotal_val, iva_val, pers_val, total = extraer_totales_intervidrio(texto)
+    # pers_val es el total de "Régimenes Esp." (percep. IVA + percep. IIBB). Se separa en cada concepto.
+    pers_iva_val  = limpiar_numero(extraer_campo(texto, PATRONES_INTERVIDRIO['pers_IVA']))
+    pers_iibb_val = limpiar_numero(extraer_campo(texto, PATRONES_INTERVIDRIO['pers_IIBB']))
+    if pers_val:
+        if pers_iva_val and not pers_iibb_val:
+            pers_iibb_val = round(pers_val - pers_iva_val, 2)
+        elif pers_iibb_val and not pers_iva_val:
+            pers_iva_val = round(pers_val - pers_iibb_val, 2)
+        elif not pers_iva_val and not pers_iibb_val:
+            pers_iibb_val = pers_val  # no se pudo separar: queda como antes
     m_iva_pct = re.search(PATRONES_INTERVIDRIO['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
     if not total and subtotal_val:
@@ -658,7 +671,8 @@ def parsear_intervidrio(texto):
         'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
         'iva':            iva_val or None,
-        'pers_IIBB':      pers_val or None,
+        'pers_IVA':       pers_iva_val or None,
+        'pers_IIBB':      pers_iibb_val or None,
         'total':          total,
         'moneda':         'ARS',
         'texto_raw':      texto,
