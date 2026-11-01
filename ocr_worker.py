@@ -43,8 +43,9 @@ PROVEEDORES = {
     "intervidrio": re.compile(r'(?i)intervidrio|LA CASA DE LOS CRISTALES'),
     "metalurgica_gg": re.compile(r'(?i)metal[uú]rgica\s*g\.?\s*g\.?|30-71051717-3'),
     "burgert":   re.compile(r'(?i)burgert|pinturasburgert|30-50203626-9'),
-    # ALUMAR: el logo sale mal en el OCR a veces, por eso también se detecta por el CUIT del emisor y el domicilio
-    "alumar":    re.compile(r'(?i)\balumar\b|20-?22368365-?8|Alte\.?\s*Solier\s*3722'),
+    "ruedamas":   re.compile(r'(?i)ruedamas|rueda\s*mas|30-?62446907-?7'),
+    "woodtools":  re.compile(r'(?i)wood\s*tools|33-?68381019-?9'),
+    "ciarrocchi": re.compile(r'(?i)ciarrocchi|33-?68808215-?9'),
 }
 
 def detectar_proveedor(texto):
@@ -539,9 +540,6 @@ PATRONES_INTERVIDRIO = {
     "cliente_nombre": None,  # aparece antes de "Dirección:", se toma con extraer_cliente_intervidrio
     "cliente_cuit":   r"(?i)C\.U\.I\.T\.:\s*([\d-]+)",
     "iva_pct":        r'(\d{1,2}[,.]\d{2})\s*%',
-    # Percepciones detalladas (hoja 2), ej: "Percep IVA RG 2408 32.087,29" / "Percep. IIBB Bs. As. 2.139,15"
-    "pers_IVA":       r'(?im)Percep\.?\s*IVA\b[^\n]*?\s(\d{1,3}(?:[.]\d{3})*[,]\d{2})[ \t]*$',
-    "pers_IIBB":      r'(?im)Percep\.?\s*IIBB\b[^\n]*?\s(\d{1,3}(?:[.]\d{3})*[,]\d{2})[ \t]*$',
 }
 
 ITEM_RE_INTERVIDRIO = re.compile(
@@ -612,45 +610,18 @@ def extraer_totales_intervidrio(texto):
     return subtotal, iva, pers, total
 
 
-CUIT_INTERVIDRIO = '30-70872721-7'
-
-
 def extraer_cliente_intervidrio(texto):
     # El cliente aparece en su propia línea justo antes de "Dirección: ... BAHIA BLANCA"
     # (puede traer el número de comprobante pegado al final, ej "Daniel Roque S.R.L. 000186").
-    # OJO: el encabezado del proveedor ("INTERVIDRIO S.R.L." + "Dirección: Calle 102...") tiene la misma
-    # forma y viene primero, así que se saltea.
-    for m in re.finditer(
+    m = re.search(
         r'(?i)\n([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\.\s]+S\.?R\.?L\.?)\s*[\d\s]*\n\s*Direcci[oóé]n:',
         texto
-    ):
-        nombre = m.group(1).strip()
-        if 'intervidrio' in nombre.lower():
-            continue
-        return nombre
-    return None
-
-
-def extraer_cuit_cliente_intervidrio(texto):
-    # Hay dos "C.U.I.T.:" (proveedor y cliente): se toma el que no es el de Intervidrio.
-    for cuit in re.findall(PATRONES_INTERVIDRIO['cliente_cuit'], texto):
-        if cuit.strip() != CUIT_INTERVIDRIO:
-            return cuit.strip()
-    return None
+    )
+    return m.group(1).strip() if m else None
 
 
 def parsear_intervidrio(texto):
     subtotal_val, iva_val, pers_val, total = extraer_totales_intervidrio(texto)
-    # pers_val es el total de "Régimenes Esp." (percep. IVA + percep. IIBB). Se separa en cada concepto.
-    pers_iva_val  = limpiar_numero(extraer_campo(texto, PATRONES_INTERVIDRIO['pers_IVA']))
-    pers_iibb_val = limpiar_numero(extraer_campo(texto, PATRONES_INTERVIDRIO['pers_IIBB']))
-    if pers_val:
-        if pers_iva_val and not pers_iibb_val:
-            pers_iibb_val = round(pers_val - pers_iva_val, 2)
-        elif pers_iibb_val and not pers_iva_val:
-            pers_iva_val = round(pers_val - pers_iibb_val, 2)
-        elif not pers_iva_val and not pers_iibb_val:
-            pers_iibb_val = pers_val  # no se pudo separar: queda como antes
     m_iva_pct = re.search(PATRONES_INTERVIDRIO['iva_pct'], texto)
     iva_pct = float(m_iva_pct.group(1).replace(',', '.')) if m_iva_pct else 21.0
     if not total and subtotal_val:
@@ -667,12 +638,11 @@ def parsear_intervidrio(texto):
         'cae':            extraer_campo(texto, PATRONES_INTERVIDRIO['cae']),
         'condicion_pago': (extraer_campo(texto, PATRONES_INTERVIDRIO['condicion_pago']) or '').strip(),
         'cliente_nombre': extraer_cliente_intervidrio(texto),
-        'cliente_cuit':   extraer_cuit_cliente_intervidrio(texto),
+        'cliente_cuit':   extraer_campo(texto, PATRONES_INTERVIDRIO['cliente_cuit']),
         'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
         'iva':            iva_val or None,
-        'pers_IVA':       pers_iva_val or None,
-        'pers_IIBB':      pers_iibb_val or None,
+        'pers_IIBB':      pers_val or None,
         'total':          total,
         'moneda':         'ARS',
         'texto_raw':      texto,
@@ -905,166 +875,484 @@ def parsear_burgert(texto):
     return factura, items
 
 
-# ── Patrones específicos ALUMAR ───────────────────────────────────────────────
-# ALUMAR (Ruggero Francisco Diego, CUIT 20-22368365-8). Columnas:
-#   Cantidad | Código | Descripción | Precio Unitario | Descuento | Importe
-# Ítem:  "10 UN L1463N PERFIL A421 NOTTE - TIRA 3 MTS 28590.000 285,900.00"
-# El precio unitario viene con punto decimal y 3 decimales (sin miles) y los importes en formato US
-# (coma de miles, punto decimal: 285,900.00).
-# El número de factura se arma con "Punto de Venta" + "Comp. Nro." (00010 + 00044613 -> 00010-00044613).
-# La letra del recuadro y el nombre del emisor salen mal en el OCR; el tipo de factura se saca del código
-# AFIP que está debajo de la letra ("COD.01" = A, 06 = B, 11 = C, 51 = M).
-CUIT_ALUMAR = '20-22368365-8'
-TIPO_POR_COD_AFIP = {'01': 'A', '06': 'B', '11': 'C', '51': 'M'}
+# ── Helpers compartidos por los parsers nuevos (Ruedamas / WoodTools / Ciarrocchi) ─
+# Prefijos de CUIT válidos (personas jurídicas y físicas). Se restringe el prefijo
+# para no confundir un código de cliente de 11 dígitos (ej. "00000001292") con un CUIT.
+CUIT_RE_NUEVOS = re.compile(r'\b((?:20|23|24|27|30|33|34)-?\d{8}-?\d)\b')
 
-PATRONES_ALUMAR = {
-    "pto_venta":      r"(?i)Punto\s+de\s+Venta\s*[:.]?\s*(\d{4,5})",
-    "comp_nro":       r"(?i)Comp\.?\s*Nro\.?\s*[:.]?\s*(\d{6,8})",
-    "fecha":          r"(?i)Fecha\s+de\s+Emisi\S{1,3}n\s*[:.]?\s*(\d{1,2}/\d{1,2}/\d{4})",
-    "cod_afip":       r"(?i)\bCOD\.?\s*(\d{2})\b",
-    "cae":            r"(?i)CAE\s*[:.]?\s*(\d{10,})",
-    "cae_vto":        r"(?i)CAE\s*[:.]?\s*\d{10,}\s+(\d{1,2}/\d{1,2}/\d{4})",
-    # "Condicion de venta: © CONTADO" (el OCR mete un símbolo antes de la palabra)
-    "condicion_pago": r"(?im)Condici\S{1,2}n\s+de\s+venta\s*[:.]?\s*[^A-Za-z0-9\n]*([A-Za-z0-9][A-Za-z0-9 ]*?)\s*[^A-Za-z0-9\n]*$",
-    "remito":         r"(?i)Nro\.?\s*Remito\s*[:.]?\s*(\d+)",
-    # Razón Social: 550-DANIEL ROQUE S.R.L. CUIT: 30649863624   (el 550 es el nº de cliente en ALUMAR)
-    "cliente":        r"(?im)Raz\S{1,2}n\s+Social\s*[:.]?\s*(?:\d+\s*-\s*)?(.+?)\s+CUIT\s*[:.]?\s*(\d{2}-?\d{8}-?\d)",
-    "cuit":           r"(?i)CUIT\s*[:.]?\s*(\d{2}-?\d{8}-?\d)",
-    "subtotal":       r"(?i)Neto\s+Gravado\s*[:.]?\s*\$?\s*([\d.,]*\d)",
-    "iva":            r"(?i)\bIva\s+(10[.,]5|21|27)(?:[.,]0+)?\s*%?\s*:?\s*\$?\s*([\d.,]*\d)",
-    "pers_IIBB":      r"(?i)Perc\w*\.?\s*(?:de\s+)?(?:IIBB|I\.?B\.?|Ingresos\s+Brutos)\S*\s*:?\s*\$?\s*([\d.,]*\d)",
-    "total":          r"(?i)Importe\s+Total\s*[:.]?\s*\$?\s*([\d.,]*\d)",
-}
-
-# importe: 285,900.00 (US, como sale en ALUMAR) o 285.900,00 (AR, por si algún PDF lo trae así)
-_NUM_US_ALUMAR = r'(?:\d{1,3}(?:,\d{3})*\.\d{2}|\d{1,3}(?:\.\d{3})*,\d{2})'
-
-ITEM_RE_ALUMAR = re.compile(
-    r'^(\d+(?:[.,]\d+)?)\s*'                                  # cantidad
-    r'(UN|UNI|MT|MTS|ML|M2|KG|PZA|PAR|JGO|SET|LT|U)?\s+'      # unidad
-    r'((?=\S*\d)\S+)\s+'                                      # código (con al menos un dígito)
-    r'(.+?)\s+'                                               # descripción
-    r'((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2,3}|(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2,3})\s+'  # precio unitario (28590.000)
-    r'(?:(\d+(?:[.,]\d+)?)\s*%?\s+)?'                         # descuento (opcional)
-    r'(' + _NUM_US_ALUMAR + r')\s*$',                         # importe (285,900.00)
-    re.IGNORECASE
-)
+# Código de comprobante AFIP -> letra de factura
+TIPO_POR_COD_AFIP = {'01': 'A', '06': 'B', '11': 'C', '19': 'E', '51': 'M'}
 
 
-def _num_alumar(s):
-    """ALUMAR: 285,900.00 / 28590.000 (US). Por si algún PDF lo trae en formato AR (285.900,00) también lo resuelve."""
-    if not s:
-        return None
-    s = s.strip()
-    if re.search(r',\d{2,3}$', s):
-        s = s.replace('.', '').replace(',', '.')
-    else:
-        s = s.replace(',', '')
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _formatear_cuit(s):
+def formatear_cuit(s):
+    """Normaliza a NN-NNNNNNNN-N (algunos proveedores lo imprimen sin guiones)."""
     d = re.sub(r'\D', '', s or '')
     return f"{d[:2]}-{d[2:10]}-{d[10]}" if len(d) == 11 else (s or None)
 
 
-def extraer_items_alumar(texto):
-    lineas = texto.split('\n')
-    ini = 0
-    for i, l in enumerate(lineas):
-        if re.search(r'(?i)cantidad', l) and re.search(r'(?i)descripci', l):
-            ini = i + 1
-            break
+def extraer_cuit_cliente(texto, cuit_emisor):
+    """
+    Las tres facturas traen dos CUIT (emisor y cliente) y el orden cambia según el
+    layout. Se descarta el del emisor (conocido) y se devuelve el primero que quede.
+    """
+    propio = re.sub(r'\D', '', cuit_emisor)
+    for m in CUIT_RE_NUEVOS.finditer(texto):
+        if re.sub(r'\D', '', m.group(1)) != propio:
+            return formatear_cuit(m.group(1))
+    return None
+
+
+def iva_pct_estandar(iva, base, default=21.0):
+    """Deduce la alícuota desde iva/base y la ajusta a 10.5 / 21 / 27 si está cerca."""
+    if not iva or not base:
+        return default
+    pct = iva / base * 100
+    for std in (10.5, 21.0, 27.0):
+        if abs(pct - std) <= 0.2:
+            return std
+    return round(pct, 2)
+
+
+def _validar_totales(nombre, items, subtotal, iva, total):
+    """Sólo loguea: ayuda a detectar lecturas erróneas sin cambiar lo que se devuelve."""
+    if items and subtotal:
+        suma = round(sum((it.get('subtotalprod') or 0) for it in items), 2)
+        if abs(suma - subtotal) > 0.05:
+            app.logger.warning("[%s] suma de ítems %.2f != subtotal %.2f", nombre, suma, subtotal)
+    if subtotal and total is not None:
+        esperado = round(subtotal + (iva or 0), 2)
+        if abs(esperado - total) > 0.05:
+            app.logger.warning("[%s] subtotal+iva %.2f != total %.2f", nombre, esperado, total)
+
+
+# ── Patrones específicos Metalúrgica Ruedamas (ERP clouderp) ──────────────────
+# Formato numérico "US". En los ítems los importes vienen SIN separador de miles
+# (18059.62, 152146.02) pero en los totales CON coma de miles ($442,438.63), por
+# eso el mismo patrón admite ambos casos. El CUIT del emisor y del cliente vienen
+# sin guiones.
+NUM_US_RUEDAMAS = r'\d+(?:,\d{3})*\.\d{2}'
+
+PATRONES_RUEDAMAS = {
+    "numero":         r"(?i)Factura\s+Venta\s*-\s*(\d{4,5}-\d{8})",
+    "fecha":          r"(?i)\bFecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r"(?m)^([ABCME])\s+Fecha:",
+    "cae":            r"(?i)C\.?A\.?E\.?\s*(\d{10,})",
+    "cae_vto":        r"(?i)Venc\.?\s*C\.?A\.?E\.?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "cliente_nombre": r"(?im)Cliente:\s*(.+?)\s*\(\d+\)\s*$",
+    "remito":         r"(?i)Remito:\s*(\S+)",
+}
+
+# Ítem: CODIGO DESCRIPCION [DESPACHO] CANT PRECIO IVA% BONIF% SUBTOTAL
+# Ej: "G38A KIT MR PLUS 2.0 (RUL. BLINDADOS + FRENOS) 13 11703.54 21 0% 152146.02"
+ITEM_RE_RUEDAMAS = re.compile(
+    r'^(\S+)\s+'                                  # codigo
+    r'(.+?)\s+'                                   # descripcion
+    r'(\d+(?:\.\d+)?)\s+'                         # cantidad
+    r'(' + NUM_US_RUEDAMAS + r')\s+'              # precio unitario
+    r'(\d{1,2}(?:\.\d+)?)\s+'                     # % IVA
+    r'(\d+(?:\.\d+)?)%\s+'                        # % bonificacion
+    r'(' + NUM_US_RUEDAMAS + r')\s*$',            # subtotal del ítem
+    re.IGNORECASE
+)
+
+
+def extraer_items_ruedamas(texto):
     items = []
-    for linea_raw in lineas[ini:]:
-        linea = limpiar_linea(linea_raw.strip())
-        if not linea:
-            continue
-        if re.search(r'(?i)neto\s+gravado|importe\s+total|^iva\s', linea):
-            break  # terminó la tabla de ítems
-        m = ITEM_RE_ALUMAR.match(linea)
+    for linea_raw in texto.split('\n'):
+        m = ITEM_RE_RUEDAMAS.match(linea_raw.strip())
         if not m:
             continue
-        cantidad = float(m.group(1).replace(',', '.'))
-        precio_lista = _num_alumar(m.group(5))
-        desc = float(m.group(6).replace(',', '.')) if m.group(6) else 0.0
-        importe = _num_alumar(m.group(7))
-        # con descuento, precio_unit es el precio ya descontado (importe / cantidad), igual que en PlacaSur
-        if desc > 0 and cantidad and importe:
-            precio_unit = round(importe / cantidad, 2)
-        else:
-            precio_unit = precio_lista
         items.append({
-            "codigo":       m.group(3).strip(),
-            "descripcion":  m.group(4).strip(),
-            "cantidad":     cantidad,
-            "precio_unit":  precio_unit,
-            "subtotalprod": importe,
+            "codigo":       m.group(1).strip(),
+            "descripcion":  m.group(2).strip(),
+            "cantidad":     limpiar_numero_us(m.group(3)),
+            "precio_unit":  limpiar_numero_us(m.group(4)),
+            "bonif_pct":    float(m.group(6)),
+            "subtotalprod": limpiar_numero_us(m.group(7)),
         })
     return items
 
 
-def parsear_alumar(texto):
-    pv  = extraer_campo(texto, PATRONES_ALUMAR['pto_venta'])
-    nro = extraer_campo(texto, PATRONES_ALUMAR['comp_nro'])
-    if pv and nro:
-        numero = f"{pv.zfill(5)}-{nro.zfill(8)}"
-    else:
-        m_n = re.search(r'\b(\d{5})-(\d{8})\b', texto)
-        numero = m_n.group(0) if m_n else None
+def extraer_totales_ruedamas(texto):
+    def _num(patron):
+        m = re.search(patron, texto)
+        return limpiar_numero_us(m.group(1)) if m else None
 
-    # Cliente: la línea "Razón Social: <nº>-<NOMBRE> CUIT: <cuit>"; si por OCR se mezcla con la del emisor,
-    # se descarta la que trae el CUIT de ALUMAR.
-    cliente_nombre, cliente_cuit = None, None
-    for m_c in re.finditer(PATRONES_ALUMAR['cliente'], texto):
-        cuit = _formatear_cuit(m_c.group(2))
-        if cuit != CUIT_ALUMAR:
-            cliente_nombre, cliente_cuit = m_c.group(1).strip(), cuit
-            break
-    if not cliente_cuit:
-        for m_u in re.finditer(PATRONES_ALUMAR['cuit'], texto):
-            cuit = _formatear_cuit(m_u.group(1))
-            if cuit != CUIT_ALUMAR:
-                cliente_cuit = cuit
-                break
+    bruto     = _num(r'(?im)^\s*Subtotal\s+\$\s*(' + NUM_US_RUEDAMAS + r')')
+    descuento = _num(r'(?im)^\s*Descuento\s+Global\s+\$\s*(' + NUM_US_RUEDAMAS + r')')
+    neto      = _num(r'(?im)^\s*Subtotal\s+Neto\s+\$\s*(' + NUM_US_RUEDAMAS + r')')
+    iva       = _num(r'(?im)^\s*IVA\s+\$\s*(' + NUM_US_RUEDAMAS + r')')
+    total     = _num(r'(?im)^\s*TOTAL\s+\$\s*(' + NUM_US_RUEDAMAS + r')')
+    # Percepciones: una línea por jurisdicción (CABA, ARBA, ...)
+    percs = re.findall(r'(?im)^\s*Percepci[oó]n\s+IIBB\s+\w+\s+\$\s*(' + NUM_US_RUEDAMAS + r')', texto)
+    pers = round(sum(limpiar_numero_us(p) or 0 for p in percs), 2)
 
-    items = extraer_items_alumar(texto)
+    # El IVA se calcula sobre el Subtotal NETO (ya sin el descuento global)
+    if neto is None and bruto is not None:
+        neto = round(bruto - (descuento or 0), 2)
+    return neto, descuento, iva, pers, total
 
-    subtotal = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['subtotal']))
-    m_iva = re.search(PATRONES_ALUMAR['iva'], texto)
-    iva_pct = float(m_iva.group(1).replace(',', '.')) if m_iva else 21.0
-    iva  = _num_alumar(m_iva.group(2)) if m_iva else None
-    pers = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['pers_IIBB']))
-    total = _num_alumar(extraer_campo(texto, PATRONES_ALUMAR['total']))
-    if subtotal is None and items:
-        subtotal = round(sum(i['subtotalprod'] or 0 for i in items), 2)
-    if iva is None and subtotal is not None:
-        iva = round(subtotal * iva_pct / 100, 2)
-    if total is None and subtotal is not None:
-        total = round(subtotal + (iva or 0) + (pers or 0), 2)
 
-    cod = extraer_campo(texto, PATRONES_ALUMAR['cod_afip'])
+def parsear_ruedamas(texto):
+    subtotal, descuento, iva, pers, total = extraer_totales_ruedamas(texto)
+    if total is None and subtotal:
+        total = round(subtotal + (iva or 0) + pers, 2)
+    items = extraer_items_ruedamas(texto)
+    _validar_totales('ruedamas', items, (subtotal + (descuento or 0)) if subtotal else None, None, None)
     factura = {
-        'proveedor':      'alumar',
-        'proveedor_cuit': CUIT_ALUMAR,
-        'numero':         numero,
-        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_ALUMAR['fecha'])),
-        'tipo_factura':   TIPO_POR_COD_AFIP.get(cod),
-        'cae':            extraer_campo(texto, PATRONES_ALUMAR['cae']),
-        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_ALUMAR['cae_vto'])),
-        'condicion_pago': (extraer_campo(texto, PATRONES_ALUMAR['condicion_pago']) or '').strip(),
-        'cliente_nombre': cliente_nombre,
-        'cliente_cuit':   cliente_cuit,
-        'remito':         extraer_campo(texto, PATRONES_ALUMAR['remito']),
+        'proveedor':      'ruedamas',
+        'numero':         extraer_campo(texto, PATRONES_RUEDAMAS['numero']),
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_RUEDAMAS['fecha'])),
+        'tipo_factura':   extraer_campo(texto, PATRONES_RUEDAMAS['tipo_factura']),
+        'cae':            extraer_campo(texto, PATRONES_RUEDAMAS['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_RUEDAMAS['cae_vto'])),
+        'condicion_pago': '',   # la factura no trae condición de venta (sólo un comentario libre)
+        'cliente_nombre': (extraer_campo(texto, PATRONES_RUEDAMAS['cliente_nombre']) or '').strip() or None,
+        'cliente_cuit':   extraer_cuit_cliente(texto, '30-62446907-7'),
+        'remito':         extraer_campo(texto, PATRONES_RUEDAMAS['remito']),
         'subtotal':       subtotal,
-        'iva_pct':        iva_pct,
+        'descuento':      descuento,
+        'iva_pct':        iva_pct_estandar(iva, subtotal),
         'iva':            iva,
         'pers_IIBB':      pers or None,
         'total':          total,
         'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    # Con descuento global el IVA va sobre el neto: subtotal + iva + perc == total
+    _validar_totales('ruedamas', None, subtotal, (iva or 0) + pers, total)
+    return factura, items
+
+
+# ── Patrones específicos Ciarrocchi Hnos S.A. (PDF de Odoo) ───────────────────
+# Formato argentino (punto de miles, coma decimal). El código del artículo va
+# entre corchetes al principio de la descripción y la descripción se parte en
+# dos líneas: la segunda trae el resto del texto + "Unidades" (la unidad).
+NUM_AR_CIARROCCHI = r'\d{1,3}(?:\.\d{3})*,\d{2}'
+
+PATRONES_CIARROCCHI = {
+    "numero":         r"(?i)N[uú]mero:\s*(\d{4,5}-\d{8})",
+    "fecha":          r"(?m)\bFecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "vencimiento":    r"(?i)Fecha de vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r"(?m)^([ABCME])\s+FACTURA\b",
+    "cae":            r"(?i)\bCAE:\s*(\d{10,})",
+    "cae_vto":        r"(?i)Fecha de vencimiento CAE:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "cliente_nombre": r"(?i)Cliente:\s*(.+?)(?:\s+Fecha de vencimiento:|\n|$)",
+}
+
+# Ej: "[HBIS70011HAF] Bisagra Cierre Suave Hafele clip codo 0 40,00 3.442,50 IVA 21% $ 137.700,00"
+ITEM_RE_CIARROCCHI = re.compile(
+    r'^\[([^\]]+)\]\s+'                             # [codigo]
+    r'(.+?)\s+'                                     # descripcion (1ra línea)
+    r'(' + NUM_AR_CIARROCCHI + r')\s+'              # cantidad
+    r'(' + NUM_AR_CIARROCCHI + r')\s+'              # precio unitario
+    r'IVA\s+\d{1,2}(?:,\d+)?\s*%\s+'                # % IVA
+    r'\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$',       # importe
+    re.IGNORECASE
+)
+
+STOP_RE_CIARROCCHI = re.compile(r'(?i)^(subtotal|iva\s|total\b|cae\b|fecha\s+de\s+vencimiento|p[aá]gina)')
+
+
+def extraer_items_ciarrocchi(texto):
+    items = []
+    current = None
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea:
+            continue
+        m = ITEM_RE_CIARROCCHI.match(linea)
+        if m:
+            current = {
+                "codigo":       m.group(1).strip(),
+                "descripcion":  m.group(2).strip(),
+                "cantidad":     limpiar_numero(m.group(3)),
+                "precio_unit":  limpiar_numero(m.group(4)),   # puede ser 0,00: se conserva el ítem
+                "subtotalprod": limpiar_numero(m.group(5)),
+            }
+            items.append(current)
+            continue
+        if STOP_RE_CIARROCCHI.search(linea):
+            current = None
+            continue
+        if current:
+            # 2da línea de la descripción: "base 3D Unidades" -> "base 3D"
+            resto = re.sub(r'(?i)\s*\bUnidades?\s*$', '', linea).strip()
+            if resto:
+                current["descripcion"] = (current["descripcion"] + ' ' + resto).strip()
+    return items
+
+
+def extraer_totales_ciarrocchi(texto):
+    m_sub = re.search(r'(?im)^Subtotal\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
+    m_tot = re.search(r'(?im)^Total\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
+    # Las líneas de ítem también contienen "IVA 21% $ ..." pero nunca al inicio de línea.
+    # Puede haber una línea por alícuota (IVA 21%, IVA 10,5%): se suman.
+    ivas = re.findall(r'(?im)^IVA\s+(\d{1,2}(?:,\d+)?)\s*%\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
+    subtotal = limpiar_numero(m_sub.group(1)) if m_sub else None
+    total = limpiar_numero(m_tot.group(1)) if m_tot else None
+    iva = round(sum(limpiar_numero(i[1]) or 0 for i in ivas), 2) if ivas else None
+    if len(ivas) == 1:
+        iva_pct = float(ivas[0][0].replace(',', '.'))
+    else:
+        iva_pct = iva_pct_estandar(iva, subtotal)
+    return subtotal, iva_pct, iva, total
+
+
+def parsear_ciarrocchi(texto):
+    subtotal, iva_pct, iva, total = extraer_totales_ciarrocchi(texto)
+    if total is None and subtotal:
+        total = round(subtotal + (iva or 0), 2)
+    items = extraer_items_ciarrocchi(texto)
+    _validar_totales('ciarrocchi', items, subtotal, iva, total)
+    factura = {
+        'proveedor':      'ciarrocchi',
+        'numero':         extraer_campo(texto, PATRONES_CIARROCCHI['numero']),
+        'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['fecha'])),
+        'vencimiento':    normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['vencimiento'])),
+        'tipo_factura':   extraer_campo(texto, PATRONES_CIARROCCHI['tipo_factura']),
+        'cae':            extraer_campo(texto, PATRONES_CIARROCCHI['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['cae_vto'])),
+        'condicion_pago': '',   # Odoo no la imprime en este layout
+        'cliente_nombre': (extraer_campo(texto, PATRONES_CIARROCCHI['cliente_nombre']) or '').strip() or None,
+        'cliente_cuit':   extraer_cuit_cliente(texto, '33-68808215-9'),
+        'subtotal':       subtotal,
+        'iva_pct':        iva_pct,
+        'iva':            iva,
+        'pers_IIBB':      None,
+        'total':          total,
+        'moneda':         'ARS',
+        'texto_raw':      texto,
+    }
+    return factura, items
+
+
+# ── Patrones específicos WoodTools S.R.L. (foto escaneada → OCR) ──────────────
+# Es la única de las tres que llega por Tesseract, así que el parser es tolerante:
+#  * La columna "Total" del ítem sale CORTADA en la foto -> no se lee; el importe
+#    del ítem se calcula como cantidad × precio con bonificación.
+#  * Las columnas "Precio", "Bonif." y "Prec c/bon." se leen y se cruzan entre sí
+#    (precio × (1 - bonif/100) == prec c/bon): esa relación permite ubicar las
+#    columnas aunque el OCR pierda comas, agregue espacios o meta "|" y "]".
+#  * Los códigos salen con O/0, S/5 confundidos ("MCDO8" por "MCD08").
+#  * Totales: se lee el subtotal; IVA y total se buscan en el texto cerca del valor
+#    esperado y, si el OCR no los leyó, se calculan.
+PATRONES_WOODTOOLS = {
+    "numero":         r"(?i)\bN\s*[°º*o]?\s*:\s*(\d{4,5}\s*[-–]\s*\d{8})",
+    "numero_generico": r"\b(\d{4,5}\s*[-–]\s*\d{8})\b",
+    "fecha":          r"(?i)\bFecha\s+(\d{1,2}/\d{1,2}/\d{4})",
+    "cod_afip":       r"(?i)C[óo]d\.?\s*n\S{0,2}\s*(\d{2})\b",
+    "cae":            r"(?i)C\.?A\.?E\.?\s*:?\s*(\d{10,})",
+    "cae_vto":        r"(?i)\bVto\.?\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"(?i)Condiciones\s+de\s+Venta:\s*(.+?)(?:\s+Remito|\n|$)",
+    "cliente_nombre": r"(?i)Se[ñn]or\s*/\s*es\s+(.+?)\s+C[óo]digo\s+de\s+Cliente",
+    "subtotal":       r"(?i)SUBTOTAL\s+\$?\s*(\d{1,3}(?:\.\d{3})+\s?[,.]?\s?\d{2})\b",
+    "iva_pct":        r"(10[,.]50|21[,.]00|27[,.]00)\s*%",
+}
+
+# Ej OCR: "S MCDO8 MECHA CIEGA DERECHA 0001 Unidad 2.00 24088,50 10,00 21679,65 43.21"
+ITEM_RE_WOODTOOLS = re.compile(
+    r'^(?:\S{1,2}\s+)?'                                   # basura OCR al margen ("S ")
+    r'([A-Z]{2,4}[0-9OSIl]{2,6})\s+'                      # código
+    r'(.+?)\s+'                                           # descripción (1ra línea)
+    r'[0-9O]{3,4}\s+(?:Unidad(?:es)?|Un\.?)(?=\s|$)\s*'   # u. de medida ("0001 Unidad")
+    r'(.*)$'                                              # cant, precio, bonif, prec c/bon, total cortado
+)
+
+STOP_RE_WOODTOOLS = re.compile(r'(?i)subtotal|impuestos|percep|transporte|observaciones|total\b|c\.a\.e|concepto\s+en')
+
+
+def corregir_codigo_woodtools(codigo):
+    """Los códigos son 3 letras + dígitos; el OCR confunde O/0, S/5, I/1 en la parte numérica."""
+    m = re.match(r'^([A-Z]{3})([0-9OSIl]+)$', codigo)
+    if not m:
+        return codigo
+    return m.group(1) + m.group(2).translate(str.maketrans('OSIl', '0511'))
+
+
+def _num_woodtools(tok):
+    """Convierte un token numérico del OCR. Las columnas de ítem no llevan separador de miles."""
+    if re.fullmatch(r'\d{5,}', tok):            # coma perdida: "3099690" -> 30996.90
+        tok = tok[:-2] + '.' + tok[-2:]
+    tok = tok.replace(',', '.')
+    partes = tok.split('.')
+    if len(partes) > 2:
+        tok = ''.join(partes[:-1]) + '.' + partes[-1]
+    try:
+        return float(tok)
+    except ValueError:
+        return None
+
+
+def _valores_cola_woodtools(cola):
+    """Lista de floats (o None si el token no es numérico) de la cola de un ítem."""
+    t = re.sub(r'[|\[\]]', ' ', cola)
+    t = re.sub(r'(?<=\d)\s+(?=[.,]\s?\d)', '', t)    # "24088 .50"  -> "24088.50"
+    t = re.sub(r'(?<=\d[.,])\s+(?=\d)', '', t)       # "53176, 50"  -> "53176,50"
+    return [_num_woodtools(tok) if re.fullmatch(r'\d[\d.,]*', tok) else None for tok in t.split()]
+
+
+def _interpretar_cola_woodtools(cola):
+    """
+    Devuelve (cantidad, precio_lista, bonif_pct, precio_con_bonif) o None.
+    Busca tres valores consecutivos con precio × (1 - bonif/100) == prec c/bon;
+    el valor anterior (si es numérico) es la cantidad.
+    """
+    vals = _valores_cola_woodtools(cola)
+    for i in range(len(vals) - 2):
+        p, b, pb = vals[i:i + 3]
+        if None in (p, b, pb) or p <= 0 or not (0 <= b <= 100):
+            continue
+        if abs(p * (1 - b / 100) - pb) <= 0.02:
+            cant = vals[i - 1] if i >= 1 else None   # None si el OCR no la leyó ("OD" en vez de "1,00")
+            return cant, p, b, pb
+    # Plan B: posicional, recalculando el precio con bonificación
+    nums = [v for v in vals if v is not None]
+    if len(nums) >= 4 and 0 <= nums[2] <= 100:
+        cant, p, b = nums[0], nums[1], nums[2]
+        return cant, p, b, round(p * (1 - b / 100), 2)
+    return None
+
+
+def extraer_items_woodtools(texto):
+    items = []
+    current = None
+    for linea_raw in texto.split('\n'):
+        linea = linea_raw.strip()
+        if not linea:
+            continue
+        m = ITEM_RE_WOODTOOLS.match(linea)
+        if m:
+            datos = _interpretar_cola_woodtools(m.group(3))
+            if not datos:
+                app.logger.warning("[woodtools] línea de ítem sin interpretar: %r", linea)
+                current = None
+                continue
+            cant, precio, bonif, precio_bon = datos
+            current = {
+                "codigo":       corregir_codigo_woodtools(m.group(1)),
+                "descripcion":  m.group(2).strip(),
+                "cantidad":     cant,
+                "precio_unit":  precio_bon,   # precio ya bonificado (igual que PlacaSur)
+                "bonif_pct":    bonif,
+                "subtotalprod": round(cant * precio_bon, 2) if cant is not None else None,
+            }
+            items.append(current)
+            continue
+        if STOP_RE_WOODTOOLS.search(linea):
+            current = None
+            continue
+        # 2da línea de la descripción ("Y=8mm L=57.5 CABO 10x20")
+        if current and re.search(r'(?i)\bCABO\b|\b[YL]\s*=', linea):
+            extra = re.sub(r'^[^A-Za-z0-9]+', '', linea)       # saca basura inicial del OCR
+            extra = re.sub(r'^[a-z]\s+(?=[A-Z]\s*=)', '', extra)  # "a Y=15mm" -> "Y=15mm"
+            current["descripcion"] = (current["descripcion"] + ' ' + extra).strip()
+            current = None
+    return items
+
+
+def _importe_ar_tolerante(s):
+    """'559.798 56' / '559.798,56' / '559.798.56' -> 559798.56"""
+    m = re.fullmatch(r'(\d{1,3}(?:\.\d{3})+)[,.]?(\d{2})', re.sub(r'\s+', '', s))
+    return float(m.group(1).replace('.', '') + '.' + m.group(2)) if m else None
+
+
+def _buscar_importe_cercano(texto, objetivo, tol):
+    """Busca en el texto un importe con formato AR a ±tol del valor esperado."""
+    for m in re.finditer(r'\d{1,3}(?:\.\d{3})+\s?[,.]\s?\d{2}\b', texto):
+        v = _importe_ar_tolerante(m.group(0))
+        if v is not None and abs(v - objetivo) <= tol:
+            return v
+    return None
+
+
+def _completar_cantidad_faltante(items, subtotal):
+    """Si exactamente un ítem quedó sin cantidad, se despeja desde el subtotal de la factura."""
+    faltan = [it for it in items if it['cantidad'] is None]
+    if len(faltan) != 1 or not subtotal:
+        return
+    it = faltan[0]
+    suma = sum(round(o['cantidad'] * o['precio_unit'], 2) for o in items if o['cantidad'] is not None)
+    cant = (subtotal - suma) / it['precio_unit'] if it['precio_unit'] else None
+    if cant and cant >= 1 and abs(cant - round(cant)) < 0.01:
+        it['cantidad'] = float(round(cant))
+        it['subtotalprod'] = round(it['cantidad'] * it['precio_unit'], 2)
+        app.logger.warning("[woodtools] cantidad de %s no leída; despejada del subtotal: %s",
+                           it['codigo'], it['cantidad'])
+    else:
+        app.logger.warning("[woodtools] cantidad de %s no leída y no se pudo despejar", it['codigo'])
+
+
+def _vencimiento_woodtools(texto, fecha_iso):
+    """
+    La foto suele salir cortada a la derecha ("Vencimiento 21/08/2"). Si falta parte del
+    año se completa con el de la fecha de emisión (o el siguiente si quedaría anterior).
+    """
+    m = re.search(r'(?i)Vencimiento\s+(\d{1,2})/(\d{1,2})/(\d{0,4})', texto)
+    if not m:
+        return None
+    d, mes, anio = m.groups()
+    if len(anio) == 4:
+        return normalizar_fecha(f"{d}/{mes}/{anio}")
+    if not fecha_iso or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', fecha_iso):
+        return None
+    a_emision = int(fecha_iso[:4])
+    for cand in (a_emision, a_emision + 1):
+        if str(cand).startswith(anio):
+            iso = f"{cand:04d}-{int(mes):02d}-{int(d):02d}"
+            if iso >= fecha_iso:
+                return iso
+    return None
+
+
+def parsear_woodtools(texto):
+    items = extraer_items_woodtools(texto)
+
+    m_sub = re.search(PATRONES_WOODTOOLS['subtotal'], texto)
+    subtotal = _importe_ar_tolerante(m_sub.group(1)) if m_sub else None
+    _completar_cantidad_faltante(items, subtotal)
+    if not subtotal and items and all(it['subtotalprod'] is not None for it in items):
+        subtotal = round(sum(it['subtotalprod'] for it in items), 2)
+
+    m_pct = re.search(PATRONES_WOODTOOLS['iva_pct'], texto)
+    iva_pct = float(m_pct.group(1).replace(',', '.')) if m_pct else 21.0
+
+    iva = total = None
+    if subtotal:
+        esperado_iva = round(subtotal * iva_pct / 100, 2)
+        iva = _buscar_importe_cercano(texto, esperado_iva, 1.0)
+        if iva is None:
+            iva = esperado_iva   # el OCR no leyó la celda de IVA
+            app.logger.warning("[woodtools] IVA no leído; calculado %.2f", iva)
+        # El total impreso sale cortado en la foto ("$677.356,2"): se busca completo o se calcula.
+        total = _buscar_importe_cercano(texto, round(subtotal + iva, 2), 0.5)
+        if total is None:
+            total = round(subtotal + iva, 2)
+    _validar_totales('woodtools', items, subtotal, iva, total)
+
+    numero = (extraer_campo(texto, PATRONES_WOODTOOLS['numero'])
+              or extraer_campo(texto, PATRONES_WOODTOOLS['numero_generico']))
+    if numero:
+        numero = re.sub(r'\s+', '', numero).replace('–', '-')
+    fecha = normalizar_fecha(extraer_campo(texto, PATRONES_WOODTOOLS['fecha']))
+    cod = extraer_campo(texto, PATRONES_WOODTOOLS['cod_afip'])
+    factura = {
+        'proveedor':      'woodtools',
+        'numero':         numero,
+        'fecha':          fecha,
+        'vencimiento':    _vencimiento_woodtools(texto, fecha),
+        'tipo_factura':   TIPO_POR_COD_AFIP.get(cod) if cod else None,
+        'cae':            extraer_campo(texto, PATRONES_WOODTOOLS['cae']),
+        'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_WOODTOOLS['cae_vto'])),
+        'condicion_pago': (extraer_campo(texto, PATRONES_WOODTOOLS['condicion_pago']) or '').strip(),
+        'cliente_nombre': (extraer_campo(texto, PATRONES_WOODTOOLS['cliente_nombre']) or '').strip() or None,
+        'cliente_cuit':   extraer_cuit_cliente(texto, '33-68381019-9'),
+        'subtotal':       subtotal,
+        'iva_pct':        iva_pct,
+        'iva':            iva,
+        'pers_IIBB':      None,
+        'total':          total,
+        'moneda':         'ARS',   # la leyenda "1USD = 1515 PESOS" de observaciones no es la moneda del comprobante
         'texto_raw':      texto,
     }
     return factura, items
@@ -1247,40 +1535,6 @@ def extraer_totales(texto):
     return subtotal_val, iva_val, pers_val, total_leido, total
 
 
-def _es_char_blanco(o):
-    """Carácter de texto BLANCO (invisible sobre fondo blanco). RGB (1,1,1), gris 1 o CMYK (0,0,0,0)."""
-    if o.get('object_type') != 'char':
-        return False
-    c = o.get('non_stroking_color')
-    if c is None:
-        return False
-    if not isinstance(c, (list, tuple)):
-        c = (c,)
-    try:
-        vals = [float(x) for x in c]
-    except (TypeError, ValueError):
-        return False
-    if len(vals) == 4:
-        return all(v < 0.01 for v in vals)
-    return len(vals) > 0 and all(v > 0.99 for v in vals)
-
-
-def extraer_texto_pdf_visible(pdf):
-    """
-    Texto de TODAS las hojas del PDF, ignorando el texto blanco.
-    Los PDF de Intervidrio traen, debajo de lo que se ve, una segunda capa de texto blanco superpuesta
-    (códigos, partidas, etc.). pdfplumber mezcla las dos capas letra por letra y la línea queda ilegible
-    ("1LL0aA,,mC55-in54E2aS5,d0Mo0..."), con lo que no se encuentra ningún ítem y el cliente sale mal.
-    """
-    partes = []
-    for pagina in pdf.pages:
-        visible = pagina.filter(lambda o: not _es_char_blanco(o))
-        t = visible.extract_text()
-        if t:
-            partes.append(t)
-    return ('\n'.join(partes) + '\n') if partes else ''
-
-
 def preparar_imagen(file_obj):
     img = Image.open(file_obj).convert('RGB')
     w, h = img.size
@@ -1334,8 +1588,12 @@ def ocr():
         factura, items = parsear_metalurgica_gg(texto)
     elif proveedor == 'burgert':
         factura, items = parsear_burgert(texto)
-    elif proveedor == 'alumar':
-        factura, items = parsear_alumar(texto)
+    elif proveedor == 'ruedamas':
+        factura, items = parsear_ruedamas(texto)
+    elif proveedor == 'woodtools':
+        factura, items = parsear_woodtools(texto)
+    elif proveedor == 'ciarrocchi':
+        factura, items = parsear_ciarrocchi(texto)
     else:
         m_tipo = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
@@ -1386,11 +1644,6 @@ def ocr_pdf():
                 t = pagina.extract_text()
                 if t:
                     texto += t + '\n'
-            # Intervidrio (factura de varias hojas): se vuelve a leer ignorando la capa de texto blanco
-            if detectar_proveedor(texto) == 'intervidrio':
-                texto_visible = extraer_texto_pdf_visible(pdf)
-                if texto_visible.strip():
-                    texto = texto_visible
 
         # Si pdfplumber no extrajo nada (PDF escaneado), hacer OCR página por página
         if not texto.strip():
@@ -1424,8 +1677,12 @@ def ocr_pdf():
         factura, items = parsear_metalurgica_gg(texto)
     elif proveedor == 'burgert':
         factura, items = parsear_burgert(texto)
-    elif proveedor == 'alumar':
-        factura, items = parsear_alumar(texto)
+    elif proveedor == 'ruedamas':
+        factura, items = parsear_ruedamas(texto)
+    elif proveedor == 'woodtools':
+        factura, items = parsear_woodtools(texto)
+    elif proveedor == 'ciarrocchi':
+        factura, items = parsear_ciarrocchi(texto)
     else:
         m_tipo   = re.search(PATRONES['tipo_factura'], texto)
         tipo_factura = m_tipo.group(1).upper() if m_tipo else None
