@@ -187,10 +187,13 @@ PATRONES_BONZINI = {
     "fecha_factura":  r"Fecha de Emision[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
     "fecha_presup":   r"FECHA[^:\n\d]{0,25}[:\s—\-]+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
     "tipo_factura":   r"FACTURA\s*\n[^A-Z\n]*([A-Z])\b",
+    # Fecha del presupuesto cuando el OCR pierde las barras: "20042026"
+    "fecha_presup_compacta": r"FECHA[^\d\n]{0,25}(\d{2})\s?(\d{2})\s?(\d{4})\b",
     "cae":            r"N[°º]?\s*de\s*CAE[:\s]*([\d]+)",
     "cae_vto":        r"Fecha de Vto de CAE[:\s]*(\d{1,2}/\d{1,2}/\d{4})",
     # "Condicion de Venta: A 30 DIAS" — evitar capturar "Condicion frente al IVA"
-    "condicion_pago": r"Condici[oó]n de Venta[:\s]*(.+?)(?:\n|$)",
+    # También "Condiciones de Venta:" (plural, formato presupuesto). Se corta antes de "N° de REMITO".
+    "condicion_pago": r"Condici[oó]n(?:es)? de Venta[:\s]*(.+?)(?:\s+N[°º]|\n|$)",
     "cliente_factura":r"Apellido Nombre/Raz[oó]n Social[:\s]*(.+?)(?:\n|$)",
     "cliente_presup": r"SE[ÑN]ORES[:\s]*(.+?)(?:\n|$)",
     "cliente_cuit":   r"CUIT[:\s]*([\d]+-[\d]+-[\d])",
@@ -201,6 +204,8 @@ PATRONES_BONZINI = {
     "total_presup":   r"TOTAL[:\s]+([\d]+[.,][\d]{2})",
     "iva_pct":        r"IVA\s+(21|10[,.]?5|27)[,.]?0*\s*%",
 }
+
+ITEMS_MARK = '----ITEMS----'
 
 def _es_presupuesto_bonzini(texto):
     return bool(re.search(r'(?i)presupuesto', texto)) or bool(re.search(r'\b9997-\d{8}\b', texto))
@@ -227,76 +232,70 @@ def _limpiar_num_bonzini(s, es_presup=False):
 def extraer_items_bonzini(texto, es_presup=False):
     items = []
     if es_presup:
-        NUM_P = r'-?[\d]+[.,][\d]{2}'
+        # Si ocr_texto_multipagina agregó una segunda pasada centrada en la banda de
+        # ítems (más limpia que la página completa), se usa solo esa.
+        if ITEMS_MARK in texto:
+            texto = texto.split(ITEMS_MARK, 1)[1]
+        NUM_P = r'-?\d+[.,]\d{2}'
+        # CANT [.]  DESCRIPCION  PRECIO  [IMPORTE o basura]
+        # El importe suele salir cortado (la columna queda al borde de la hoja escaneada),
+        # por eso es opcional y, si no es confiable, se calcula cantidad * precio.
         item_re = re.compile(
-            r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+[\S]*\s*(' + NUM_P + r')\s*$'
+            r'^(\d+(?:[,.]\d+)?)[.,_]*\s+(.+?)\s+(' + NUM_P + r')(?:\s+(\S.*))?$'
         )
-        item_re2 = re.compile(
-            r'^(\d+(?:[,.]\d+)?)\s+(.+?)\s+(' + NUM_P + r')\s+(' + NUM_P + r')\s*$'
-        )
-        desc_re = re.compile(
-            r'^(?:\d+\s+)?(Descuento\s+General).*?(-[\d]+[.,][\d]{2})\s+(-[\d]+[.,][\d]{2})\s*$',
-            re.IGNORECASE
-        )
-        desc_re2 = desc_re
+        # El % del descuento ("8.68%") también parece un decimal: se saca antes de buscar el importe.
+        desc_re = re.compile(r'^(?:(\d+)[.,_]*\s+)?(Descuento\s+General)(.*)$', re.IGNORECASE)
         IGNORAR_PRESUP = re.compile(
             r'(?i)^(se[ñn]ores|domicilio|iva:|condicion|fecha|presupuesto|'
             r'n[°º]|ped|observ|total\b|remito|bahia|cuit|cantidad|descripci)'
         )
+
+        def _importe_confiable(cola, esperado):
+            """Devuelve el importe leído si es un decimal completo y coincide con
+            cant*precio (tolerancia $1); si no, el calculado."""
+            m_n = re.search(NUM_P, cola or '')
+            if m_n:
+                v = _limpiar_num_bonzini(m_n.group(0))
+                if v is not None and abs(v - esperado) <= 1.0:
+                    return v
+            return round(esperado, 2)
+
         for linea_raw in texto.split('\n'):
-            linea = re.sub(r'^[\s|]+', '', linea_raw).strip()
+            linea = re.sub(r'^[\s|\[\]!;:.,_\'"‘’~]+', '', linea_raw).strip()
             if not linea or len(linea) < 5:
                 continue
             if IGNORAR_PRESUP.match(linea):
                 continue
-            # Descuento general (puede tener ruido entre precio e importe)
-            m_d = desc_re.match(linea) or desc_re2.match(linea)
+            m_d = desc_re.match(linea)
             if m_d:
-                desc_limpia = re.sub(r'[\s.\-=%\d]+$', '', m_d.group(1)).strip()
+                resto = re.sub(r'\d+[.,]?\d*\s*%', ' ', m_d.group(3))
+                m_p = re.search(r'(?<![\d.,])(\d+[.,]\d{2})(?!\d)', resto)
+                if not m_p:
+                    continue
+                cant = _limpiar_num_bonzini(m_d.group(1)) if m_d.group(1) else 1
+                precio = -abs(_limpiar_num_bonzini(m_p.group(1)))  # un descuento siempre resta
                 items.append({
-                    "codigo": None, "descripcion": desc_limpia,
-                    "cantidad": 1,
-                    "precio_unit":  _limpiar_num_bonzini(m_d.group(2)),
-                    "subtotalprod": _limpiar_num_bonzini(m_d.group(3)),
+                    "codigo": None, "descripcion": "Descuento General",
+                    "cantidad":     cant,
+                    "precio_unit":  precio,
+                    "subtotalprod": _importe_confiable(resto[m_p.end():], (cant or 1) * precio),
                 })
                 continue
-            # Ítem normal
-            m = item_re.match(linea) or item_re2.match(linea)
+            m = item_re.match(linea)
             if m:
                 desc = m.group(2).strip()
                 if len(desc) < 3:
                     continue
-                cant  = _limpiar_num_bonzini(m.group(1))
+                cant = _limpiar_num_bonzini(m.group(1))
                 precio = _limpiar_num_bonzini(m.group(3))
-                subtotal = _limpiar_num_bonzini(m.group(4))
-                # Si el importe está corrupto, calcularlo
-                if subtotal is None and cant and precio:
-                    subtotal = round(cant * precio, 2)
+                if not cant or precio is None:
+                    continue
                 items.append({
                     "codigo": None, "descripcion": desc,
                     "cantidad":     cant,
                     "precio_unit":  precio,
-                    "subtotalprod": subtotal,
+                    "subtotalprod": _importe_confiable(m.group(4), cant * precio),
                 })
-                continue
-            # Fallback: línea con cantidad, descripción y precio pero importe corrupto
-            # Formato: "2 DESCRIPCION 65279.98 : texto_corrupto"
-            NUM_P2 = r'[\d]+[.,][\d]{2}'
-            m_fb = re.match(
-                r'^(\d+)\s+(.{5,}?)\s+(' + NUM_P2 + r')\s*[:\|]',
-                linea
-            )
-            if m_fb:
-                desc = m_fb.group(2).strip()
-                cant = _limpiar_num_bonzini(m_fb.group(1))
-                precio = _limpiar_num_bonzini(m_fb.group(3))
-                if cant and precio and len(desc) >= 3:
-                    items.append({
-                        "codigo": None, "descripcion": desc,
-                        "cantidad":     cant,
-                        "precio_unit":  precio,
-                        "subtotalprod": round(cant * precio, 2),
-                    })
     else:
         # Factura Bonzini: DESCRIPCION  CANTIDAD  PRECIO_UNIT  FINAL_C_IVA
         # Números con punto decimal: 6079.04  14711.28
@@ -366,8 +365,15 @@ def parsear_bonzini(texto):
     fecha_raw = extraer_campo(texto, PATRONES_BONZINI['fecha_factura']) \
                 or extraer_campo(texto, PATRONES_BONZINI['fecha_presup']) \
                 or extraer_campo(texto, PATRONES['fecha'])
+    if not fecha_raw:
+        m_fc = re.search(PATRONES_BONZINI['fecha_presup_compacta'], texto)
+        if m_fc:
+            fecha_raw = f"{m_fc.group(1)}/{m_fc.group(2)}/{m_fc.group(3)}"
     cliente = extraer_campo(texto, PATRONES_BONZINI['cliente_factura']) \
               or extraer_campo(texto, PATRONES_BONZINI['cliente_presup'])
+    cliente = re.sub(r'[\s~|_\-—.,;:]+$', '', cliente or '')
+    cond = (extraer_campo(texto, PATRONES_BONZINI['condicion_pago']) or '').strip()
+    cond = re.sub(r'^A(\d)', r'A \1', cond)   # "A30 DIAS" -> "A 30 DIAS"
     if es_presup:
         tipo_doc = "Presupuesto"
         total_raw = extraer_campo(texto, PATRONES_BONZINI['total_presup'])
@@ -392,7 +398,7 @@ def parsear_bonzini(texto):
         'tipo_factura':   tipo_doc,
         'cae':            None if es_presup else extraer_campo(texto, PATRONES_BONZINI['cae']),
         'cae_vto':        None if es_presup else normalizar_fecha(extraer_campo(texto, PATRONES_BONZINI['cae_vto'])),
-        'condicion_pago': (extraer_campo(texto, PATRONES_BONZINI['condicion_pago']) or '').strip(),
+        'condicion_pago': cond,
         'cliente_nombre': (cliente or '').strip(),
         'cliente_cuit':   extraer_campo(texto, PATRONES_BONZINI['cliente_cuit']),
         'subtotal':       subtotal or None,
@@ -404,6 +410,12 @@ def parsear_bonzini(texto):
         'texto_raw':      texto,
     }
     items = extraer_items_bonzini(texto, es_presup)
+    # Control cruzado: la suma de ítems debe dar el total leído (tolerancia $1 por redondeo).
+    if es_presup and items and total:
+        suma = round(sum(i.get('subtotalprod') or 0 for i in items), 2)
+        if abs(suma - total) > 1.0:
+            factura['advertencia'] = (f"La suma de ítems ({suma}) no coincide con el total "
+                                      f"({total}); revisar manualmente.")
     return factura, items
 
 # ── Patrones específicos INOMAX ───────────────────────────────────────────────
@@ -613,11 +625,29 @@ def extraer_totales_intervidrio(texto):
 def extraer_cliente_intervidrio(texto):
     # El cliente aparece en su propia línea justo antes de "Dirección: ... BAHIA BLANCA"
     # (puede traer el número de comprobante pegado al final, ej "Daniel Roque S.R.L. 000186").
-    m = re.search(
+    # Hay dos bloques "NOMBRE S.R.L. / Dirección:": primero el emisor (Intervidrio) y
+    # después el cliente; se devuelve el primero que no sea el emisor.
+    for m in re.finditer(
         r'(?i)\n([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\.\s]+S\.?R\.?L\.?)\s*[\d\s]*\n\s*Direcci[oóé]n:',
         texto
-    )
-    return m.group(1).strip() if m else None
+    ):
+        nombre = m.group(1).strip()
+        if 'intervidrio' not in nombre.lower():
+            return nombre
+    return None
+
+
+def extraer_cuit_cliente_intervidrio(texto):
+    # Hay dos "C.U.I.T.:" (emisor primero, cliente después): se devuelve el primero que
+    # no sea el del emisor.
+    cuits = re.findall(PATRONES_INTERVIDRIO['cliente_cuit'], texto)
+    if not cuits:
+        return None
+    emisor = cuits[0]
+    for c in cuits[1:]:
+        if c != emisor:
+            return c
+    return None
 
 
 def parsear_intervidrio(texto):
@@ -638,7 +668,7 @@ def parsear_intervidrio(texto):
         'cae':            extraer_campo(texto, PATRONES_INTERVIDRIO['cae']),
         'condicion_pago': (extraer_campo(texto, PATRONES_INTERVIDRIO['condicion_pago']) or '').strip(),
         'cliente_nombre': extraer_cliente_intervidrio(texto),
-        'cliente_cuit':   extraer_campo(texto, PATRONES_INTERVIDRIO['cliente_cuit']),
+        'cliente_cuit':   extraer_cuit_cliente_intervidrio(texto),
         'subtotal':       subtotal_val or None,
         'iva_pct':        iva_pct,
         'iva':            iva_val or None,
@@ -1545,6 +1575,45 @@ def preparar_imagen(file_obj):
     img = ImageOps.autocontrast(img, cutoff=2)
     return img
 
+def _segunda_pasada_items(img, texto):
+    """Presupuestos Bonzini: en la página completa el OCR lee mal la banda de ítems
+    (pliegues/manchas; ej. 4987.33 -> 4007.99). Se re-lee solo esa banda, entre la línea
+    de 'REMITO' y la de 'Observaciones', y se devuelve marcada con ITEMS_MARK."""
+    if not re.search(r'(?i)presupuesto|\b9997-\d{8}\b', texto):
+        return ''
+    try:
+        d = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng',
+                                      output_type=pytesseract.Output.DICT)
+        y_top = y_bot = None
+        for i, w in enumerate(d['text']):
+            w = (w or '').strip().lower()
+            if 'remito' in w and y_top is None:
+                y_top = d['top'][i] + d['height'][i]
+            if w.startswith('observ') and y_bot is None:
+                y_bot = d['top'][i]
+        if y_top is None or y_bot is None or y_bot <= y_top:
+            return ''
+        # Se re-lee solo la banda de ítems, recortada hasta el último renglón con números
+        # confiables: leer toda la zona hasta 'Observaciones' (manchas, pliegues) hace que
+        # el OCR confunda los números (ej. 4987.33 -> 4007.99).
+        y_fin = None
+        for i, w in enumerate(d['text']):
+            try:
+                conf = float(d['conf'][i])
+            except (TypeError, ValueError):
+                conf = -1
+            w = (w or '').strip()
+            if len(w) >= 3 and conf >= 60 and re.search(r'\d', w) \
+                    and y_top <= d['top'][i] < y_bot - 40:
+                y_fin = max(y_fin or 0, d['top'][i] + d['height'][i])
+        if not y_fin:
+            return ''
+        banda = img.crop((0, y_top, img.width, min(y_bot, y_fin + 25)))
+        txt = pytesseract.image_to_string(banda, config='--psm 6 -l spa+eng')
+        return '\n' + ITEMS_MARK + '\n' + txt
+    except Exception:
+        return ''
+
 def ocr_texto_multipagina(archivos):
     """
     Recibe una lista de FileStorage (una por hoja/página de la misma factura),
@@ -1556,8 +1625,46 @@ def ocr_texto_multipagina(archivos):
     for archivo in archivos:
         img = preparar_imagen(archivo)
         texto_pagina = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
+        texto_pagina += _segunda_pasada_items(img, texto_pagina)
         partes.append(texto_pagina)
     return '\n\n----PAGINA----\n\n'.join(partes)
+
+
+def _es_blanco(color):
+    """True si el color de relleno de un carácter es blanco (RGB, gris o CMYK)."""
+    if color is None:
+        return False
+    if not isinstance(color, (tuple, list)):
+        color = (color,)
+    if len(color) == 1:
+        return color[0] >= 0.99
+    if len(color) == 3:
+        return all(c >= 0.99 for c in color)
+    if len(color) == 4:
+        return all(c <= 0.01 for c in color)
+    return False
+
+def extraer_texto_pdf_pagina(pagina):
+    """Extrae el texto de una página con pdfplumber.
+
+    Algunos PDF (ej. Intervidrio) traen DOS capas de texto superpuestas: la visible (negra)
+    y una oculta en blanco con el mismo contenido (Código/Partida, etc.). pdfplumber las
+    intercala carácter por carácter y el texto queda ilegible ("1TT0eF,,mC83-p94INl2a7..."),
+    por eso fallaban los ítems. Si una parte grande de los caracteres es blanca y hay texto
+    negro, se descartan los blancos. Con pocos caracteres blancos (ej. títulos sobre fondo
+    oscuro) no se toca nada.
+    """
+    chars = pagina.chars
+    n_blancos = sum(1 for c in chars if c['text'].strip() and _es_blanco(c.get('non_stroking_color')))
+    n_total = sum(1 for c in chars if c['text'].strip())
+    if n_total and n_blancos / n_total > 0.2 and n_blancos < n_total:
+        filtrada = pagina.filter(
+            # También se descartan los espacios blancos de la capa oculta, si no se
+            # intercalan entre las letras visibles ("T e m p l a d o").
+            lambda o: o.get('object_type') != 'char'
+            or not _es_blanco(o.get('non_stroking_color')))
+        return filtrada.extract_text()
+    return pagina.extract_text()
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.post('/ocr')
@@ -1641,7 +1748,7 @@ def ocr_pdf():
         texto = ''
         with pdfplumber.open(tmp_path) as pdf:
             for pagina in pdf.pages:
-                t = pagina.extract_text()
+                t = extraer_texto_pdf_pagina(pagina)
                 if t:
                     texto += t + '\n'
 
