@@ -808,34 +808,151 @@ def parsear_metalurgica_gg(texto):
 # (coma = miles, punto = decimales). El precio unitario a veces viene sin
 # separador de miles ("497192.00") y el importe con él ("497,192.00"); el
 # patrón admite ambos casos.
+#
+# La impresora de Burgert deja ESPACIOS dentro de los números y las fechas
+# ("508640. 50", "508, 640. 50", "26/ 10/ 2026", "A00010- 00014368") y el OCR
+# además parte palabras ("Subt ot al", "Descuent o"). Por eso parsear_burgert
+# primero normaliza el texto (_normalizar_burgert) y los regex de totales
+# toleran espacios entre letras. Los errores de dígitos del OCR (cantidad "4.00"
+# en vez de "1.00", "ROOO0100..." en vez de "R00001...") se corrigen con
+# chequeos cruzados (cantidad x precio = importe, aritmética de totales).
 NUM_US_BURGERT = r'\d+(?:,\d{3})*\.\d{2}'
+BURGERT_NUM_MARK = '----NUMERO-BURGERT----'
+BURGERT_COD_MARK = '----CODIGOS-BURGERT----'
+CODIGO_BURGERT_RE = re.compile(r'[A-Z]{3}\d{4}[A-Z]{2}')
+
+
+def _sp(palabra):
+    """Regex de una palabra tolerando espacios entre letras ('Subt ot al')."""
+    return r'\s*'.join(re.escape(c) for c in palabra)
+
 
 PATRONES_BURGERT = {
-    "numero":         r"(?i)N[°ºo]?\s*[:.]?\s*(A?\d{4,5}\s*-\s*\d{5,8})",
-    "fecha":          r"(?i)FECHA\s+(\d{1,2}/\d{1,2}/\d{4})",
-    "tipo_factura":   r'(?i)FACTURA\s+"?([ABCME])"?\s+ELECTR[OÓ]NICA',
+    "numero":         r"(?i)N[°ºo]?\s*[:.]?\s*(A?\d{4,5}-\d{8})",
+    "fecha":          r"(?i)\bFECHA\s+(\d{1,2}/\d{1,2}/\d{4})",
+    "tipo_factura":   r'(?i)FACTURA\s+"?([ABCME])"?\s+ELECTR',
     "cae":            r"(?i)C\.?A\.?E\.?\s*N[°º]?\s*:?\s*(\d{10,})",
-    "cae_vto":        r"(?i)vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})",
-    "condicion_pago": r"(?i)Cond\.?\s*Venta:\s*(.+?)(?:\n|REMITO|$)",
-    "remito":         r"(?i)REMITO:\s*(\S+)",
-    "cliente_cuit":   r"(?i)Responsable inscripto\s*\n?\s*([\d-]{11,13})",
+    "cae_vto":        r"(?i)vto[.,]?\s*C\.?A\.?E\.?\s*[:.]?\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "condicion_pago": r"(?i)Cond\.?\s*Venta\s*:\s*(.+?)(?:\n|REM\s*TO|$)",
+    "remito":         r"(?i)REM\s*TO\.?\s*:?\s*(R[0-9OIl]{10,14})",
+    "cliente_cuit":   r"(?i)Responsable\s*inscri\s*pto\s*\n?\s*(\d{2}-?\d{8}-?\d)",
 }
 
 # Item: CANTIDAD  CODIGO  DESCRIPCION  PRECIO(us)  IMPORTE(us)
 # Ej: "1.00 CPU5552KL LACA BLANCA SM (50g) 5552 20L 497192.00 497,192.00"
+# (texto ya normalizado; se tolera algo de basura antes de la cantidad)
 ITEM_RE_BURGERT = re.compile(
-    r'^(\d+\.\d{2})\s+'                     # cantidad
+    r'^\W{0,3}(\d+\.\d{2})\s+'              # cantidad
     r'(\S+)\s+'                             # codigo
     r'(.+?)\s+'                             # descripcion
     r'(' + NUM_US_BURGERT + r')\s+'         # precio unitario
-    r'(' + NUM_US_BURGERT + r')\s*$',       # importe
+    r'(' + NUM_US_BURGERT + r')\W*$',       # importe
     re.IGNORECASE
 )
 
 STOP_RE_BURGERT = re.compile(
-    r'(?i)^(cantidad\s+codigo|subtotal|descuento|i\.?v\.?a\.?|perc\.?\s*i{1,2}b{1,2}|'
-    r'total\b|c\.a\.e|remito|cond\.?\s*venta|responsable\s+inscripto)'
+    r'(?i)^\W*(cant\s*i?\s*dad\s+codi|subt|descuent|i\.?v\.?a\.?\b|perc\.?\s*i{1,2}b{1,2}|'
+    r'total\b|c\.a\.e|rem\s*to|cond\.?\s*venta|responsable\s+inscri)'
 )
+
+
+def _normalizar_burgert(texto):
+    """Pega los números/fechas que la impresora separa con espacios."""
+    t = texto
+    # "1 i 479, 131.54" -> "1,479, 131.54": una letra suelta hace de coma de miles
+    t = re.sub(r'(?<=\d)\s+[iIl|]\s+(?=\d{3}\W)', ',', t)
+    # "508, 640. 50" -> "508,640.50" | "26/ 10/ 2026" -> "26/10/2026" | "A00010- 0001" -> "A00010-0001"
+    t = re.sub(r'(?<=\d)\s*([.,/\-])\s+(?=\d)', r'\1', t)
+    return t
+
+
+def _segunda_pasada_numero_burgert(img, texto):
+    """El número de comprobante sale con un dígito mal en la lectura de página completa
+    (ej. 00014368 -> 09014368). Se re-lee solo esa línea, a otra escala, y se vota."""
+    if not re.search(PROVEEDORES['burgert'], texto):
+        return ''
+    try:
+        d = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng',
+                                      output_type=pytesseract.Output.DICT)
+        x0 = y0 = h0 = None
+        for i, w_ in enumerate(d['text']):
+            if re.match(r'(?i)^A\d{4,5}-?$', (w_ or '').strip()):
+                x0, y0, h0 = d['left'][i], d['top'][i], d['height'][i]
+                break
+        if x0 is None:
+            return ''
+        crop = img.crop((max(0, x0 - 40), max(0, y0 - 20), img.width, y0 + h0 + 40))
+        votos = {}
+        for escala, psm in ((1, 7), (2, 7), (2, 6), (1, 6)):
+            c = crop.resize((crop.width * escala, crop.height * escala), Image.LANCZOS) if escala != 1 else crop
+            t = pytesseract.image_to_string(c, config=f'--psm {psm} -l eng')
+            m = re.search(r'(A\d{4,5})\s*-\s*(\d{8})', t)
+            if m:
+                k = f"{m.group(1)}-{m.group(2)}"
+                votos[k] = votos.get(k, 0) + 1
+        if not votos:
+            return ''
+        mejor = max(votos.items(), key=lambda kv: kv[1])[0]
+        return '\n' + BURGERT_NUM_MARK + '\n' + mejor + '\n'
+    except Exception:
+        return ''
+
+
+def _segunda_pasada_codigos_burgert(img, texto):
+    """Algunos códigos salen mal en la lectura de página completa (DLP8676KL -> OLR8676KL).
+    Se re-lee cada celda de código sola (palabra suelta, sólo mayúsculas y dígitos) a
+    distintas escalas y se vota; sólo se corrige si la relectura es mayoritaria. Devuelve líneas
+    'leido=>corregido' bajo BURGERT_COD_MARK."""
+    if not re.search(PROVEEDORES['burgert'], texto):
+        return ''
+    try:
+        d = pytesseract.image_to_data(img, config='--psm 6 -l spa+eng',
+                                      output_type=pytesseract.Output.DICT)
+        toks = []
+        for i, w_ in enumerate(d['text']):
+            t = (w_ or '').strip().upper()
+            if re.fullmatch(r'[A-Z0-9]{8,10}', t) and re.search(r'\d{3}', t):
+                toks.append((i, t))
+        buenos = [d['left'][i] for i, t in toks if CODIGO_BURGERT_RE.fullmatch(t)]
+        if not buenos:
+            return ''
+        col_x = sorted(buenos)[len(buenos) // 2]          # mediana: columna de códigos
+        pares = []
+        for i, t in toks:
+            if abs(d['left'][i] - col_x) > 40:
+                continue
+            x, y, wd, h = d['left'][i], d['top'][i], d['width'][i], d['height'][i]
+            crop = img.crop((max(0, x - 15), max(0, y - 12), x + wd + 25, y + h + 12))
+            votos = {}
+            for esc, psm in ((1, 8), (2, 8), (2, 7), (3, 8)):
+                c = crop.resize((crop.width * esc, crop.height * esc), Image.LANCZOS) if esc != 1 else crop
+                r = pytesseract.image_to_string(
+                    c, config=f'--psm {psm} -l eng -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+                ).strip().upper()
+                if CODIGO_BURGERT_RE.fullmatch(r):
+                    votos[r] = votos.get(r, 0) + 1
+            if votos:
+                mejor, n = max(votos.items(), key=lambda kv: kv[1])
+                # se cambia el código sólo si la relectura es mayoritaria (>=3 de 4 pasadas)
+                if n >= 3 and mejor != t:
+                    pares.append(f"{t}=>{mejor}")
+        if not pares:
+            return ''
+        return '\n' + BURGERT_COD_MARK + '\n' + '\n'.join(pares) + '\n'
+    except Exception:
+        return ''
+
+
+def _codigo_burgert(codigo, desc):
+    """Códigos tipo CPU5552KL: 3 letras + 4 dígitos + 2 letras. El número de 4 dígitos
+    también va en la descripción ('... 5552 20L'). Si en el código el OCR metió una
+    letra en vez de un dígito (CPUS552KL), se repone con el de la descripción."""
+    c = (codigo or '').strip().upper()
+    if len(c) == 9 and not re.fullmatch(r'[A-Z]{3}\d{4}[A-Z]{2}', c):
+        m = re.search(r'\b(\d{4})\s+\d+\s*[A-Z]{1,2}\s*$', desc or '', re.IGNORECASE)
+        if m and re.fullmatch(r'[A-Z]{3}.{4}[A-Z]{2}', c):
+            c = c[:3] + m.group(1) + c[-2:]
+    return c
 
 
 def extraer_items_burgert(texto):
@@ -847,51 +964,133 @@ def extraer_items_burgert(texto):
         m = ITEM_RE_BURGERT.match(linea)
         if not m:
             continue
+        desc = m.group(3).strip()
+        cant = limpiar_numero_us(m.group(1))
+        precio = limpiar_numero_us(m.group(4))
+        importe = limpiar_numero_us(m.group(5))
+        # El OCR confunde la cantidad (1.00 -> 4.00). Se verifica contra importe/precio.
+        if precio and importe:
+            esperada = round(importe / precio)
+            if esperada >= 1 and abs(cant * precio - importe) > 0.05 * max(1, cant):
+                if abs(esperada * precio - importe) <= 0.05 * esperada:
+                    app.logger.warning("[burgert] cantidad corregida %s -> %s (%s)", cant, esperada, desc)
+                    cant = float(esperada)
         items.append({
-            "codigo":       m.group(2).strip(),
-            "descripcion":  m.group(3).strip(),
-            "cantidad":     limpiar_numero_us(m.group(1)),
-            "precio_unit":  limpiar_numero_us(m.group(4)),
-            "subtotalprod": limpiar_numero_us(m.group(5)),
+            "codigo":       _codigo_burgert(m.group(2), desc),
+            "descripcion":  desc,
+            "cantidad":     cant,
+            "precio_unit":  precio,
+            "subtotalprod": importe,
         })
     return items
 
 
-def extraer_totales_burgert(texto):
+def extraer_totales_burgert(texto, items=None):
     # Hay dos líneas "Subtotal" (bruto y neto de descuento); nos quedamos
     # con la última, que es el subtotal neto que se usa para el IVA.
-    subtotales = re.findall(r'(?i)subtotal\s*:?\s*(' + NUM_US_BURGERT + r')', texto)
+    subtotales = re.findall(r'(?i)' + _sp('subtotal') + r'\s*:?\s*(' + NUM_US_BURGERT + r')', texto)
     subtotal_val = limpiar_numero_us(subtotales[-1]) if subtotales else None
+    bruto_val = limpiar_numero_us(subtotales[0]) if len(subtotales) > 1 else None
 
     descuento_val = limpiar_numero_us(
-        extraer_campo(texto, r"(?i)Descuento\s*:?\s*(" + NUM_US_BURGERT + r")"))
+        extraer_campo(texto, r"(?i)" + _sp('descuento') + r"\s*:?\s*(" + NUM_US_BURGERT + r")"))
     iva_val = limpiar_numero_us(
-        extraer_campo(texto, r"(?i)I\.?V\.?A\.?\s*:?\s*(" + NUM_US_BURGERT + r")"))
+        extraer_campo(texto, r"(?i)\b[I1l]\s*\.?\s*V\s*\.?\s*A\s*\.?\s*:?\s*(" + NUM_US_BURGERT + r")"))
     pers_val = limpiar_numero_us(
-        extraer_campo(texto, r"(?i)Perc\.?\s*I{1,2}B{1,2}\s*:?\s*(" + NUM_US_BURGERT + r")"))
+        extraer_campo(texto, r"(?i)Perc\.?\s*[I1l]{1,2}\s*B{1,2}\s*:?\s*(" + NUM_US_BURGERT + r")"))
     total = limpiar_numero_us(
-        extraer_campo(texto, r"(?i)\bTOTAL\s+(" + NUM_US_BURGERT + r")"))
+        extraer_campo(texto, r"(?i)\bTOTAL\s*:?\s*(" + NUM_US_BURGERT + r")"))
+
+    # Respaldos aritméticos: el OCR suele perder alguno de los importes del pie.
+    if descuento_val is None and subtotal_val is not None:
+        if bruto_val is None and items:
+            bruto_val = round(sum((it.get('subtotalprod') or 0) for it in items), 2)
+        if bruto_val and bruto_val > subtotal_val:
+            descuento_val = round(bruto_val - subtotal_val, 2)
+    if iva_val is None and subtotal_val is not None and total is not None:
+        iva_val = round(total - subtotal_val - (pers_val or 0), 2)
+    if total is None and subtotal_val is not None and iva_val is not None:
+        total = round(subtotal_val + iva_val + (pers_val or 0), 2)
+    if subtotal_val is None and total is not None and iva_val is not None:
+        subtotal_val = round(total - iva_val - (pers_val or 0), 2)
 
     iva_pct = round(iva_val / subtotal_val * 100, 2) if (iva_val and subtotal_val) else 21.0
+    for std in (10.5, 21.0, 27.0):
+        if abs(iva_pct - std) <= 0.2:
+            iva_pct = std
+            break
 
     return subtotal_val, descuento_val, iva_pct, iva_val, pers_val, total
 
 
-def parsear_burgert(texto):
-    subtotal_val, descuento_val, iva_pct, iva_val, pers_val, total = extraer_totales_burgert(texto)
-    numero = extraer_campo(texto, PATRONES_BURGERT['numero'])
+def parsear_burgert(texto_original):
+    # Segundas pasadas (número y códigos): se separan del resto del texto.
+    numero_2da = None
+    codigos_2da = {}
+    texto = texto_original
+    if BURGERT_COD_MARK in texto:
+        antes, resto = texto.split(BURGERT_COD_MARK, 1)
+        for ln in resto.strip('\n').split('\n'):
+            if '=>' in ln:
+                a, b = ln.split('=>', 1)
+                codigos_2da[a.strip()] = b.strip()
+        texto = antes
+    if BURGERT_NUM_MARK in texto:
+        antes, resto = texto.split(BURGERT_NUM_MARK, 1)
+        lineas = resto.strip('\n').split('\n', 1)
+        numero_2da = lineas[0].strip() or None
+        texto = antes + (lineas[1] if len(lineas) > 1 else '')
+    texto = _normalizar_burgert(texto)
+
+    items = extraer_items_burgert(texto)
+    for it in items:
+        # lectura de la celda sola (si la hay) > corrección por la descripción
+        cod_orig = it['codigo']
+        for leido, corregido in codigos_2da.items():
+            if cod_orig == leido or (cod_orig[:3] + cod_orig[-2:] == leido[:3] + leido[-2:] and len(cod_orig) == len(leido)
+                                      and sum(a != b for a, b in zip(cod_orig, leido)) <= 1):
+                it['codigo'] = corregido
+                break
+    subtotal_val, descuento_val, iva_pct, iva_val, pers_val, total = extraer_totales_burgert(texto, items)
+
+    numero = numero_2da or extraer_campo(texto, PATRONES_BURGERT['numero'])
     if numero:
         numero = re.sub(r'\s+', '', numero)
+
+    tipo = extraer_campo(texto, PATRONES_BURGERT['tipo_factura'])
+    if not tipo:
+        m_cod = re.search(r'(?i)\bCod\.?\s*:?\s*(\d{3}|\d{2})\b', texto)
+        if m_cod:
+            tipo = TIPO_POR_COD_AFIP.get(m_cod.group(1)[-2:])
+
+    remito = extraer_campo(texto, PATRONES_BURGERT['remito'])
+    if remito:
+        # R + 12 dígitos: el OCR lee "O" por "0" ("ROOO0100087606")
+        remito = remito[0].upper() + re.sub(r'[OoIl]', lambda m_: '0' if m_.group(0) in 'Oo' else '1', remito[1:])
+
+    cuit_cli = extraer_campo(texto, PATRONES_BURGERT['cliente_cuit'])
+    cuit_cli = formatear_cuit(cuit_cli) if cuit_cli else extraer_cuit_cliente(texto, '30-50203626-9')
+
+    # Sólo log: los ítems suman el subtotal BRUTO (antes del descuento).
+    if items and subtotal_val is not None and descuento_val is not None:
+        suma = round(sum((it.get('subtotalprod') or 0) for it in items), 2)
+        if abs(suma - (subtotal_val + descuento_val)) > 0.05:
+            app.logger.warning("[burgert] suma de ítems %.2f != subtotal bruto %.2f", suma, subtotal_val + descuento_val)
+    if subtotal_val is not None and iva_val is not None and total is not None:
+        esperado = round(subtotal_val + iva_val + (pers_val or 0), 2)
+        if abs(esperado - total) > 0.05:
+            app.logger.warning("[burgert] subtotal+iva+perc %.2f != total %.2f", esperado, total)
+
     factura = {
         'proveedor':      'burgert',
         'numero':         numero,
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_BURGERT['fecha'])),
-        'tipo_factura':   extraer_campo(texto, PATRONES_BURGERT['tipo_factura']),
+        'tipo_factura':   tipo,
         'cae':            extraer_campo(texto, PATRONES_BURGERT['cae']),
         'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_BURGERT['cae_vto'])),
         'condicion_pago': (extraer_campo(texto, PATRONES_BURGERT['condicion_pago']) or '').strip(),
-        'cliente_cuit':   extraer_campo(texto, PATRONES_BURGERT['cliente_cuit']),
-        'remito':         extraer_campo(texto, PATRONES_BURGERT['remito']),
+        'cliente_cuit':   cuit_cli,
+        'remito':         remito,
         'subtotal':       subtotal_val,
         'descuento':      descuento_val,
         'iva_pct':        iva_pct,
@@ -899,9 +1098,8 @@ def parsear_burgert(texto):
         'pers_IIBB':      pers_val,
         'total':          total,
         'moneda':         'ARS',
-        'texto_raw':      texto,
+        'texto_raw':      texto_original,
     }
-    items = extraer_items_burgert(texto)
     return factura, items
 
 
@@ -1681,6 +1879,8 @@ def ocr_texto_multipagina(archivos):
         img = preparar_imagen(archivo)
         texto_pagina = pytesseract.image_to_string(img, config='--psm 6 -l spa+eng')
         texto_pagina += _segunda_pasada_items(img, texto_pagina)
+        texto_pagina += _segunda_pasada_numero_burgert(img, texto_pagina)
+        texto_pagina += _segunda_pasada_codigos_burgert(img, texto_pagina)
         partes.append(texto_pagina)
     return '\n\n----PAGINA----\n\n'.join(partes)
 
