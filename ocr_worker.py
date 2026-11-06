@@ -1054,34 +1054,55 @@ def parsear_ruedamas(texto):
     return factura, items
 
 
-# ── Patrones específicos Ciarrocchi Hnos S.A. (PDF de Odoo) ───────────────────
+# ── Patrones específicos Ciarrocchi Hnos S.A. (PDF de Odoo, o foto escaneada) ──
 # Formato argentino (punto de miles, coma decimal). El código del artículo va
 # entre corchetes al principio de la descripción y la descripción se parte en
 # dos líneas: la segunda trae el resto del texto + "Unidades" (la unidad).
+# Cuando la factura es una foto escaneada, el OCR mete basura (tildes de lapicera,
+# manchas) al principio/final de las líneas y a veces pierde espacios ("IVA21%"),
+# por eso los regex de acá NO se anclan al inicio de línea y los espacios son opcionales.
 NUM_AR_CIARROCCHI = r'\d{1,3}(?:\.\d{3})*,\d{2}'
 
 PATRONES_CIARROCCHI = {
     "numero":         r"(?i)N[uú]mero:\s*(\d{4,5}-\d{8})",
     "fecha":          r"(?m)\bFecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
     "vencimiento":    r"(?i)Fecha de vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
-    "tipo_factura":   r"(?m)^([ABCME])\s+FACTURA\b",
+    "tipo_factura":   r"(?m)^[^\n]{0,15}?\b([ABCME])\s+FACTURA\b",
     "cae":            r"(?i)\bCAE:\s*(\d{10,})",
     "cae_vto":        r"(?i)Fecha de vencimiento CAE:\s*(\d{1,2}/\d{1,2}/\d{4})",
     "cliente_nombre": r"(?i)Cliente:\s*(.+?)(?:\s+Fecha de vencimiento:|\n|$)",
 }
 
 # Ej: "[HBIS70011HAF] Bisagra Cierre Suave Hafele clip codo 0 40,00 3.442,50 IVA 21% $ 137.700,00"
+# Tolera: basura antes del "[", "IVA21%" sin espacio, "$" pegado al importe y
+# basura (puntos, manchas) después del importe.
 ITEM_RE_CIARROCCHI = re.compile(
-    r'^\[([^\]]+)\]\s+'                             # [codigo]
+    r'^\W{0,4}\[([^\]]+)\]\s*'                      # [codigo]
     r'(.+?)\s+'                                     # descripcion (1ra línea)
     r'(' + NUM_AR_CIARROCCHI + r')\s+'              # cantidad
     r'(' + NUM_AR_CIARROCCHI + r')\s+'              # precio unitario
-    r'IVA\s+\d{1,2}(?:,\d+)?\s*%\s+'                # % IVA
-    r'\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$',       # importe
+    r'IVA\s*\d{1,2}(?:,\d+)?\s*%\s*'                # % IVA (espacios opcionales)
+    r'\$?\s*(' + NUM_AR_CIARROCCHI + r')'           # importe
+    r'[\s\W]*$',
     re.IGNORECASE
 )
 
-STOP_RE_CIARROCCHI = re.compile(r'(?i)^(subtotal|iva\s|total\b|cae\b|fecha\s+de\s+vencimiento|p[aá]gina)')
+# Corta la descripción multilínea. Sin ancla "^": con OCR puede haber basura delante.
+STOP_RE_CIARROCCHI = re.compile(
+    r'(?i)\b(subtotal|total|cae)\b\s*:?\s*\$?\s*\d|^\W*(?:\w{1,3}\s+)?(?:iva\s*\d|p[aá]gina\b)'
+)
+
+
+def _limpiar_desc_ciarrocchi(txt):
+    """Saca tokens de basura del OCR (símbolos sueltos, letras minúsculas solas)."""
+    toks = []
+    for t in txt.split():
+        if not re.search(r'[A-Za-z0-9]', t):
+            continue                       # "~", ";", "_", "#."
+        if len(t) == 1 and t.islower():
+            continue                       # "f" suelta de una mancha
+        toks.append(t)
+    return ' '.join(toks)
 
 
 def extraer_items_ciarrocchi(texto):
@@ -1095,7 +1116,7 @@ def extraer_items_ciarrocchi(texto):
         if m:
             current = {
                 "codigo":       m.group(1).strip(),
-                "descripcion":  m.group(2).strip(),
+                "descripcion":  _limpiar_desc_ciarrocchi(m.group(2)),
                 "cantidad":     limpiar_numero(m.group(3)),
                 "precio_unit":  limpiar_numero(m.group(4)),   # puede ser 0,00: se conserva el ítem
                 "subtotalprod": limpiar_numero(m.group(5)),
@@ -1106,19 +1127,31 @@ def extraer_items_ciarrocchi(texto):
             current = None
             continue
         if current:
-            # 2da línea de la descripción: "base 3D Unidades" -> "base 3D"
-            resto = re.sub(r'(?i)\s*\bUnidades?\s*$', '', linea).strip()
-            if resto:
-                current["descripcion"] = (current["descripcion"] + ' ' + resto).strip()
+            # Sólo es continuación de descripción si trae la unidad ("... Unidades"),
+            # que es lo que imprime Odoo en la 2da línea. Cualquier otra cosa es ruido.
+            mu = re.search(r'(?i)^(.*?)\bUnidades?\b', linea)
+            if mu:
+                resto = _limpiar_desc_ciarrocchi(mu.group(1))
+                if resto:
+                    current["descripcion"] = (current["descripcion"] + ' ' + resto).strip()
+                current = None
     return items
 
 
 def extraer_totales_ciarrocchi(texto):
-    m_sub = re.search(r'(?im)^Subtotal\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
-    m_tot = re.search(r'(?im)^Total\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
-    # Las líneas de ítem también contienen "IVA 21% $ ..." pero nunca al inicio de línea.
-    # Puede haber una línea por alícuota (IVA 21%, IVA 10,5%): se suman.
-    ivas = re.findall(r'(?im)^IVA\s+(\d{1,2}(?:,\d+)?)\s*%\s+\$\s*(' + NUM_AR_CIARROCCHI + r')\s*$', texto)
+    # Sin ancla de inicio de línea: el OCR puede anteponer basura ("at Subtotal $ ...").
+    m_sub = re.search(r'(?im)\bSubtotal\s*\$?\s*(' + NUM_AR_CIARROCCHI + r')[\s\W]*$', texto)
+    # "\bTotal" no matchea dentro de "Subtotal" (no hay límite de palabra entre "b" y "t").
+    m_tot = re.search(r'(?im)\bTotal\s*\$?\s*(' + NUM_AR_CIARROCCHI + r')[\s\W]*$', texto)
+    # Puede haber una línea por alícuota (IVA 21%, IVA 10,5%): se suman. Las líneas
+    # de ítem también dicen "IVA 21% $ ..." pero llevan "[codigo]", por eso se descartan.
+    ivas = []
+    for linea in texto.split('\n'):
+        if '[' in linea:
+            continue
+        mi = re.search(r'(?i)\bIVA\s*(\d{1,2}(?:,\d+)?)\s*%\s*\$?\s*(' + NUM_AR_CIARROCCHI + r')[\s\W]*$', linea)
+        if mi:
+            ivas.append((mi.group(1), mi.group(2)))
     subtotal = limpiar_numero(m_sub.group(1)) if m_sub else None
     total = limpiar_numero(m_tot.group(1)) if m_tot else None
     iva = round(sum(limpiar_numero(i[1]) or 0 for i in ivas), 2) if ivas else None
@@ -1129,18 +1162,40 @@ def extraer_totales_ciarrocchi(texto):
     return subtotal, iva_pct, iva, total
 
 
+def _tipo_factura_ciarrocchi(texto):
+    """La letra se lee en el encabezado; si el OCR la despega de 'FACTURA',
+    se deduce del código de comprobante AFIP ('Cod. 01' -> A)."""
+    t = extraer_campo(texto, PATRONES_CIARROCCHI['tipo_factura'])
+    if t:
+        return t.upper()
+    m = re.search(r'(?i)\bCod\.?\s*(\d{2})\b', texto)
+    if m:
+        return TIPO_POR_COD_AFIP.get(m.group(1))
+    return None
+
+
 def parsear_ciarrocchi(texto):
     subtotal, iva_pct, iva, total = extraer_totales_ciarrocchi(texto)
+    items = extraer_items_ciarrocchi(texto)
+    # Respaldo: si el OCR no leyó el subtotal, se reconstruye desde los ítems / total / IVA
+    if subtotal is None and items:
+        suma = round(sum((it.get('subtotalprod') or 0) for it in items), 2)
+        if suma:
+            subtotal = suma
+    if subtotal is None and total is not None and iva is not None:
+        subtotal = round(total - iva, 2)
     if total is None and subtotal:
         total = round(subtotal + (iva or 0), 2)
-    items = extraer_items_ciarrocchi(texto)
+    if iva is None and subtotal and total is not None:
+        iva = round(total - subtotal, 2)
+        iva_pct = iva_pct_estandar(iva, subtotal)
     _validar_totales('ciarrocchi', items, subtotal, iva, total)
     factura = {
         'proveedor':      'ciarrocchi',
         'numero':         extraer_campo(texto, PATRONES_CIARROCCHI['numero']),
         'fecha':          normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['fecha'])),
         'vencimiento':    normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['vencimiento'])),
-        'tipo_factura':   extraer_campo(texto, PATRONES_CIARROCCHI['tipo_factura']),
+        'tipo_factura':   _tipo_factura_ciarrocchi(texto),
         'cae':            extraer_campo(texto, PATRONES_CIARROCCHI['cae']),
         'cae_vto':        normalizar_fecha(extraer_campo(texto, PATRONES_CIARROCCHI['cae_vto'])),
         'condicion_pago': '',   # Odoo no la imprime en este layout
