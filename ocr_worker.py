@@ -1265,20 +1265,25 @@ PATRONES_CIARROCCHI = {
     "numero":         r"(?i)N[uú]mero:\s*(\d{4,5}-\d{8})",
     "fecha":          r"(?m)\bFecha:\s*(\d{1,2}/\d{1,2}/\d{4})",
     "vencimiento":    r"(?i)Fecha de vencimiento:\s*(\d{1,2}/\d{1,2}/\d{4})",
-    "tipo_factura":   r"(?m)^[^\n]{0,15}?\b([ABCME])\s+FACTURA\b",
+    "tipo_factura":   r"(?m)^[^\n]{0,15}?\b([ABCME])\s+FACTURA\b|\bHnos\s+([ABCME])\s*$",
     "cae":            r"(?i)\bCAE:\s*(\d{10,})",
-    "cae_vto":        r"(?i)Fecha de vencimiento CAE:\s*(\d{1,2}/\d{1,2}/\d{4})",
+    "cae_vto":        r"(?i)Fecha de vencimiento CAE:[\s\S]{0,80}?(\d{1,2}/\d{1,2}/\d{4})",
     "cliente_nombre": r"(?i)Cliente:\s*(.+?)(?:\s+Fecha de vencimiento:|\n|$)",
 }
 
 # Ej: "[HBIS70011HAF] Bisagra Cierre Suave Hafele clip codo 0 40,00 3.442,50 IVA 21% $ 137.700,00"
 # Tolera: basura antes del "[", "IVA21%" sin espacio, "$" pegado al importe y
 # basura (puntos, manchas) después del importe.
+# La columna "Desc.%" es OPCIONAL: algunas facturas la traen ("4,00 18.479,00 0,00 IVA 21% $ 73.916,00")
+# y otras no. Si el regex no la contemplara, la descripción absorbería la cantidad y los
+# números se correrían una columna (cantidad = precio unitario, precio = descuento).
+DESC_TOK_CIARROCCHI = r'\d{1,3}[.,]\d{1,2}'
 ITEM_RE_CIARROCCHI = re.compile(
     r'^\W{0,4}\[([^\]]+)\]\s*'                      # [codigo]
     r'(.+?)\s+'                                     # descripcion (1ra línea)
     r'(' + NUM_AR_CIARROCCHI + r')\s+'              # cantidad
-    r'(' + NUM_AR_CIARROCCHI + r')\s+'              # precio unitario
+    r'(' + NUM_AR_CIARROCCHI + r')\s+'              # precio unitario (de lista)
+    r'(?:(' + DESC_TOK_CIARROCCHI + r')\s*%?\s+)?'  # Desc.% (opcional)
     r'IVA\s*\d{1,2}(?:,\d+)?\s*%\s*'                # % IVA (espacios opcionales)
     r'\$?\s*(' + NUM_AR_CIARROCCHI + r')'           # importe
     r'[\s\W]*$',
@@ -1292,15 +1297,41 @@ STOP_RE_CIARROCCHI = re.compile(
 
 
 def _limpiar_desc_ciarrocchi(txt):
-    """Saca tokens de basura del OCR (símbolos sueltos, letras minúsculas solas)."""
+    """Saca tokens de basura del OCR (símbolos sueltos, letras minúsculas solas),
+    pero conserva los guiones separadores ("Zincado - 494.02.064")."""
+    crudos = txt.split()
     toks = []
-    for t in txt.split():
+    for k, t in enumerate(crudos):
         if not re.search(r'[A-Za-z0-9]', t):
+            if t == '-' and 0 < k < len(crudos) - 1:
+                toks.append(t)             # guion entre palabras
             continue                       # "~", ";", "_", "#."
         if len(t) == 1 and t.islower():
             continue                       # "f" suelta de una mancha
         toks.append(t)
+    while toks and toks[-1] == '-':
+        toks.pop()
     return ' '.join(toks)
+
+
+def _codigo_ciarrocchi(c):
+    """Códigos Ciarrocchi: 4 letras + 5 dígitos + 3 letras (HCOR06005HAF). El OCR confunde
+    O/0, I/1, S/5, B/8, Z/2: se corrige según la zona (letras o dígitos)."""
+    c = (c or '').strip().upper()
+    if len(c) != 12:
+        return c
+    a_letra = {'0': 'O', '1': 'I', '5': 'S', '8': 'B', '2': 'Z'}
+    a_digito = {'O': '0', 'I': '1', 'L': '1', 'S': '5', 'B': '8', 'Z': '2', 'Q': '0', 'D': '0'}
+    zona = lambda i: 'L' if (i < 4 or i >= 9) else 'D'
+    out = []
+    for i, ch in enumerate(c):
+        if zona(i) == 'D' and ch in a_digito:
+            out.append(a_digito[ch])
+        elif zona(i) == 'L' and ch in a_letra:
+            out.append(a_letra[ch])
+        else:
+            out.append(ch)
+    return ''.join(out)
 
 
 def extraer_items_ciarrocchi(texto):
@@ -1312,12 +1343,28 @@ def extraer_items_ciarrocchi(texto):
             continue
         m = ITEM_RE_CIARROCCHI.match(linea)
         if m:
+            cant = limpiar_numero(m.group(3))
+            precio = limpiar_numero(m.group(4))               # precio de lista; puede ser 0,00
+            desc_pct = limpiar_numero(m.group(5).replace('.', ',')) if m.group(5) else None
+            importe = limpiar_numero(m.group(6))
+            # Verificación: cantidad x precio x (1 - desc%) debe dar el importe del renglón.
+            if cant and precio and importe is not None:
+                esperado = round(cant * precio * (1 - (desc_pct or 0) / 100), 2)
+                if abs(esperado - importe) > 1:
+                    bruto = cant * precio
+                    if 0 < importe < bruto:
+                        # el OCR no leyó (o leyó mal) el Desc.%: se deduce del importe
+                        desc_pct = round((1 - importe / bruto) * 100, 2)
+                    else:
+                        app.logger.warning("[ciarrocchi] cant x precio != importe (%s): %s x %s -> %s",
+                                           m.group(1), cant, precio, importe)
             current = {
-                "codigo":       m.group(1).strip(),
-                "descripcion":  _limpiar_desc_ciarrocchi(m.group(2)),
-                "cantidad":     limpiar_numero(m.group(3)),
-                "precio_unit":  limpiar_numero(m.group(4)),   # puede ser 0,00: se conserva el ítem
-                "subtotalprod": limpiar_numero(m.group(5)),
+                "codigo":        _codigo_ciarrocchi(m.group(1)),
+                "descripcion":   _limpiar_desc_ciarrocchi(m.group(2)),
+                "cantidad":      cant,
+                "precio_unit":   precio,
+                "descuento_pct": desc_pct or 0.0,
+                "subtotalprod":  importe,
             }
             items.append(current)
             continue
@@ -1361,11 +1408,13 @@ def extraer_totales_ciarrocchi(texto):
 
 
 def _tipo_factura_ciarrocchi(texto):
-    """La letra se lee en el encabezado; si el OCR la despega de 'FACTURA',
-    se deduce del código de comprobante AFIP ('Cod. 01' -> A)."""
-    t = extraer_campo(texto, PATRONES_CIARROCCHI['tipo_factura'])
-    if t:
-        return t.upper()
+    """La letra se lee en el encabezado (junto a 'FACTURA' o al final de 'Ciarrocchi Hnos');
+    si el OCR no la trae, se deduce del código de comprobante AFIP ('Cod. 01' -> A)."""
+    m = re.search(PATRONES_CIARROCCHI['tipo_factura'], texto)
+    if m:
+        letra = next((g for g in m.groups() if g), None)
+        if letra:
+            return letra.upper()
     m = re.search(r'(?i)\bCod\.?\s*(\d{2})\b', texto)
     if m:
         return TIPO_POR_COD_AFIP.get(m.group(1))
